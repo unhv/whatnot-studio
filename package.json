@@ -1,0 +1,21 @@
+{
+  "name": "whatnot-studio",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Viability spike for a Whatnot live-selling studio app that owns picture/sound over obs-websocket while Whatnot's own Show Tools page owns Go Live.",
+  "type": "module",
+  "scripts": {
+    "probe": "tsx spike/probe.ts",
+    "test": "vitest run"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "obs-websocket-js": "^5.0.6"
+  }
+}

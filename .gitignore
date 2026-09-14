@@ -5,3 +5,5 @@ out/
 *.log
 .env*
 release/
+.pipeline/
+.git-commit-msg.txt
