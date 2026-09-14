@@ -1,21 +1,38 @@
 {
   "name": "whatnot-studio",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
-  "description": "Viability spike for a Whatnot live-selling studio app that owns picture/sound over obs-websocket while Whatnot's own Show Tools page owns Go Live.",
+  "description": "A single-window Electron app that owns OBS picture/sound over obs-websocket for a Whatnot seller, while Whatnot's own Show Tools page owns Go Live.",
   "type": "module",
+  "main": "dist-electron/electron/main.js",
   "scripts": {
     "probe": "tsx spike/probe.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dev:renderer": "vite",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "start": "electron ."
   },
   "license": "UNLICENSED",
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "electron": "^33.2.1",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
+    "vite": "^5.4.11",
     "vitest": "^2.1.8"
   },
   "dependencies": {
-    "obs-websocket-js": "^5.0.6"
+    "obs-websocket-js": "^5.0.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.2"
   }
 }

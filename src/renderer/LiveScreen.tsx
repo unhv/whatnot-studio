@@ -1,0 +1,144 @@
+import { useEffect, useState } from "react";
+import { useAppStore } from "../state/store.js";
+import { elapsedMs } from "../obs/liveMode.js";
+import { formatElapsed, formatPrice } from "../shared/format.js";
+import { deriveLowerThirdText } from "../state/itemBar.js";
+import { SCENE_KEYS, type SceneKey } from "../shared/types.js";
+
+const SCENE_HOTKEYS: Record<SceneKey, string> = { ME: "F1", TABLE: "F2", BOTH: "F3", BREAK: "F4" };
+
+/** The product. ~520px wide, full height, dark, nothing under 16px, no
+ * button under 64px — sized to sit beside the seller's browser. */
+export default function LiveScreen() {
+  const live = useAppStore((s) => s.live);
+  const activeScene = useAppStore((s) => s.activeScene);
+  const setActiveScene = useAppStore((s) => s.setActiveScene);
+  const micMuted = useAppStore((s) => s.micMuted);
+  const setMicMuted = useAppStore((s) => s.setMicMuted);
+  const itemBar = useAppStore((s) => s.itemBar);
+  const dispatchItemBar = useAppStore((s) => s.dispatchItemBar);
+  const goToSetup = useAppStore((s) => s.goToSetup);
+
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      dispatchItemBar({ type: "TICK", now: t });
+    }, 250);
+    return () => clearInterval(id);
+  }, [dispatchItemBar]);
+
+  const [itemDraft, setItemDraft] = useState("");
+  const [priceDraft, setPriceDraft] = useState("");
+  const lowerThird = deriveLowerThirdText(itemBar);
+  const selling = itemBar.soldUntil !== null;
+
+  function showItem() {
+    if (itemDraft.trim() === "") return;
+    dispatchItemBar({ type: "SET_ITEM", item: itemDraft, price: formatPrice(priceDraft) });
+    dispatchItemBar({ type: "SHOW" });
+  }
+
+  function clearItem() {
+    dispatchItemBar({ type: "CLEAR" });
+    setItemDraft("");
+    setPriceDraft("");
+  }
+
+  function sold() {
+    dispatchItemBar({ type: "SOLD", now: Date.now() });
+  }
+
+  return (
+    <div className="flex min-h-screen w-[520px] flex-col gap-4 bg-neutral-950 p-4 text-neutral-100">
+      {/* Status strip. No Go Live button, ever — this only ever reflects
+          StreamStateChanged from Whatnot's own Show Tools page. */}
+      <div className="flex items-center justify-between rounded-md bg-neutral-900 px-4 py-3">
+        <div className="flex items-center gap-2 text-lg font-semibold">
+          <span className={live.live ? "text-red-500" : "text-neutral-500"}>●</span>
+          <span>{live.live ? `LIVE ${formatElapsed(elapsedMs(live, now))}` : "NOT LIVE"}</span>
+        </div>
+        <button
+          className="text-sm text-neutral-400 underline disabled:cursor-not-allowed disabled:text-neutral-700 disabled:no-underline"
+          disabled={live.live}
+          onClick={goToSetup}
+        >
+          Setup
+        </button>
+      </div>
+
+      {/* Preview, ~270px wide portrait, not clickable. Populated by polling
+          GetSourceScreenshot at 2-4fps once connected — see HANDOVER.md. */}
+      <div className="mx-auto flex h-[480px] w-[270px] items-center justify-center rounded-md bg-black ring-1 ring-neutral-800">
+        <span className="text-xs text-neutral-600">Preview</span>
+      </div>
+
+      {/* Scene grid: straight cut between ME/TABLE/BOTH, 300ms fade into/out
+          of BREAK — the fade duration itself is applied over the websocket,
+          not here; this button only sets the intent. */}
+      <div className="grid grid-cols-2 gap-3">
+        {SCENE_KEYS.map((key) => (
+          <button
+            key={key}
+            className={`h-24 rounded-md text-xl font-semibold transition-colors ${
+              activeScene === key ? "bg-amber-500 text-neutral-950" : "bg-neutral-900 text-neutral-100 hover:bg-neutral-800"
+            }`}
+            onClick={() => setActiveScene(key)}
+          >
+            <div>{key}</div>
+            <div className="text-xs font-normal opacity-70">{SCENE_HOTKEYS[key]}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Item bar */}
+      <div className="flex flex-col gap-2 rounded-md bg-neutral-900 p-3">
+        <div className="flex gap-2">
+          <input
+            className="flex-1 rounded-md bg-neutral-950 px-3 py-3 text-base outline-none ring-1 ring-neutral-800 focus:ring-neutral-500"
+            placeholder="What's on the table"
+            value={itemDraft}
+            onChange={(e) => setItemDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") showItem();
+            }}
+          />
+          <input
+            className="w-24 rounded-md bg-neutral-950 px-3 py-3 text-base outline-none ring-1 ring-neutral-800 focus:ring-neutral-500"
+            placeholder="Price"
+            value={priceDraft}
+            onChange={(e) => setPriceDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") showItem();
+            }}
+          />
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-neutral-400">{lowerThird ?? "Nothing on canvas"}</span>
+          <button className="rounded-md bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={clearItem}>
+            CLEAR
+          </button>
+        </div>
+      </div>
+
+      {/* SOLD — the biggest button on the screen. */}
+      <button
+        className="h-20 w-full rounded-md bg-amber-400 text-3xl font-bold text-neutral-950 hover:bg-amber-300"
+        onClick={sold}
+      >
+        {selling ? "SOLD!" : "SOLD! (F5)"}
+      </button>
+
+      {/* Mic mute — the whole row turns red when muted. */}
+      <button
+        className={`flex h-16 items-center justify-center rounded-md text-lg font-semibold ${
+          micMuted ? "bg-red-600 text-white" : "bg-neutral-900 text-neutral-100 hover:bg-neutral-800"
+        }`}
+        onClick={() => setMicMuted(!micMuted)}
+      >
+        {micMuted ? "MUTED" : "MUTE"}
+      </button>
+    </div>
+  );
+}

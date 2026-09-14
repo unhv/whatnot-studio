@@ -9,8 +9,9 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "outDir": "dist",
-    "noEmit": true
+    "outDir": "../dist-electron",
+    "rootDir": "..",
+    "noEmit": false
   },
-  "include": ["spike/**/*.ts", "tests/**/*.ts", "src/shared/**/*.ts", "src/obs/**/*.ts", "src/state/**/*.ts"]
+  "include": ["main.ts", "preload.ts", "../src/obs/**/*.ts", "../src/shared/**/*.ts", "../spike/lib.ts", "../spike/obs-launcher.ts"]
 }
