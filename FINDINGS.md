@@ -337,3 +337,226 @@ only select an existing profile/collection, so first run needs to create one (th
 helpers for that are written and unit-tested but not yet wired into an end-to-end create flow),
 and a stinger transition (not needed for the MVP's cut+fade) would need to be authored once
 outside the API.
+
+## 2026-09-15 — the supervised run (real OBS, throwaway "Whatnot Studio Test" profile+collection)
+
+Written incrementally as each item is measured, per this session's brief. All measurements below
+are against a real OBS 31.1.2 launched on this machine with `--profile "Whatnot Studio Test"
+--collection "Whatnot Studio Test"`, never against the user's own `Untitled` profile/collection.
+
+### Bug found and fixed before anything else could be measured: scene collections live at `basic\scenes\`, not `basic\scene_collections\`
+
+`electron/main.ts`'s `firstRunPaths()` built `sceneCollectionJsonPath` under
+`AppData\Roaming\obs-studio\basic\scene_collections\<name>.json`. That directory does not exist on
+this machine (confirmed by walking `basic\` — the real one and only relevant dir is `basic\scenes\`,
+containing `Untitled.json` for the user's real collection). Fixed to `basic\scenes\`. This is a real
+bug, not a guess gone stale — the code would have silently written the skeleton to a path OBS never
+reads and then relied on `verifyProfileAndCollection`'s mismatch stop condition to catch it (safe,
+but it would have refused to continue on every single first run).
+
+### Bug found and fixed: obs-websocket's `server_enabled` flag was never set
+
+`src/obs/launch.ts`'s `launchObsForProduct` passed `--websocket_port`/`--websocket_password`/
+`--websocket_ipv4_only` but never called the spike's already-written `ensureWebsocketServerEnabled()`.
+Measured directly: this machine's persisted `plugin_config/obs-websocket/config.json` had
+`"server_enabled": false`, and after launching OBS with all three websocket CLI flags the port still
+never opened (confirmed via a raw TCP connect attempt, not just the app's own `waitForPort`) — this
+matches FINDINGS.md's spike-era note that the CLI flags only override values, never flip the switch.
+Calling `ensureWebsocketServerEnabled()` before spawn (added as `launchObsForProductAsync`, wired into
+`electron/main.ts`'s `obs:launch` handler) fixed it — confirmed: after the fix, a raw `net.connect`
+to 127.0.0.1:4455 succeeded and `obs-websocket-js` connected and issued requests successfully.
+Unit-tested (`tests/launch.test.ts`) by mocking `ensureWebsocketServerEnabled` and asserting it's
+called before the (mocked) spawn.
+
+### A genuine crash on the very first launch of a brand-new profile — not reproduced on retry
+
+The very first launch attempt on the fresh `Whatnot Studio Test` profile+collection (which had never
+existed on this machine before) died silently within ~30s: OBS's own log showed a fully successful
+startup through `Loaded scenes: - scene 'Scene'` (i.e. our hand-written scene-collection skeleton had
+already loaded correctly) and then nothing further — no crash dump was written to
+`AppData\Roaming\obs-studio\crashes\` (empty both before and after). The only artifact was a fresh
+`safe_mode` marker. Two subsequent launches on the exact same (now-existing) profile/collection files
+did not reproduce this — OBS started and ran normally. Recorded here rather than chased further,
+since it was a one-off cost of a truly first "first run" and does not recur once the profile exists.
+**Practical consequence for the product**: the first-run flow already restarts OBS once after setting
+the canvas (`runFirstRunSetup`), so a first-launch flake would very likely resolve itself; but
+`FirstRunResult` doesn't currently retry after a launch that never reaches a working port at all
+(`waitForPort` just throws). Worth a retry-once wrapper around the very first launch specifically —
+not implemented this session, noted as a remaining gap below.
+
+### The Safe Mode dialog is real, was seen on screen, and *does* respond to a graceful close
+
+Because of the crash above, the very next launch showed OBS's own "Unclean shutdown detected" /
+Safe Mode dialog — confirmed **visible** (`Get-Process -Id <pid> | Select MainWindowTitle` returned
+`"Safe Mode"`, not empty) despite `--minimize-to-tray` being passed, exactly as FINDINGS.md's spike
+section warned. It was dismissed with a **graceful** close (`taskkill /PID <pid>`, no `/F`) — OBS's
+own window responded to that (title went back to empty, i.e. no visible window, process kept running
+and later opened the websocket port normally) rather than requiring a force-kill. **This confirms the
+graceful-close path is sufficient even for this dialog** — no force-kill was needed or used at any
+point in this session. The `safe_mode` marker this created was cleared by OBS itself on the
+subsequent clean exit (confirmed absent at session end — see the acceptance section at the bottom of
+this file).
+
+### Checklist item 1 — field names: CONFIRMED, no bug
+
+`GetProfileList` really does return `{ currentProfileName, profiles }` and `GetSceneCollectionList`
+really does return `{ currentSceneCollectionName, sceneCollections }` on OBS 31.1.2 / obs-websocket
+5.6.2 — exactly what `src/obs/firstRun.ts`'s `verifyProfileAndCollection` already expected. **No code
+change needed here.** Raw response, connected to the throwaway profile:
+
+```json
+{
+  "currentProfileName": "Whatnot Studio Test",
+  "profiles": ["Untitled", "Whatnot Studio Test"]
+}
+{
+  "currentSceneCollectionName": "Whatnot Studio Test",
+  "sceneCollections": ["Untitled", "Whatnot Studio Test"]
+}
+```
+
+`GetVersion` also confirmed: `obsVersion: "31.1.2"`, `obsWebSocketVersion: "5.6.2"`.
+
+### Checklist item 2 — the hand-written scene-collection skeleton: OBS accepted it, no fallback needed
+
+`buildSceneCollectionSkeleton` written to `basic\scenes\Whatnot Studio Test.json` was loaded by OBS
+without complaint — `GetSceneCollectionList.currentSceneCollectionName` came back `"Whatnot Studio
+Test"` on the very first launch that reached a working websocket port, and OBS's own log showed
+`Switched to scene 'Scene'` / `Loaded scenes: - scene 'Scene'` referencing our skeleton's one
+placeholder scene. **The `CreateProfile`/`CreateSceneCollection` fallback documented in HANDOVER.md
+was never needed and was not exercised.** `GetVideoSettings` after launch also confirmed the profile
+ini's `[Video]` section took effect: `baseWidth: 1080, baseHeight: 1920, fpsNumerator: 30,
+fpsDenominator: 1` — exactly the 1080x1920@30 canvas `buildFirstRunProfileIni` writes.
+
+### Checklist item 3 — `syncScenes` / `CreateInput`'s duplicate-scene-item risk: CONFIRMED, real bug, fixed
+
+Ran `buildDesiredScenes` + `syncScenes` against the live "Whatnot Studio Test" collection (a scratch
+probe, `scratch/probe3_syncscenes.ts`). Before the fix, one live sync produced:
+
+```
+scene ME:    items= [ 'Camera', 'Camera', 'Table', 'BREAK Card' ]   <- 4 items, should be 1
+scene TABLE: items= [ 'Table' ]
+scene BOTH:  items= [ 'Table', 'Camera' ]
+scene BREAK: items= [ 'BREAK Card' ]
+```
+
+Worse than a simple duplicate: `applyPlan.ts`'s `syncScenes` passed a hardcoded
+`sceneName: desired[0]?.sceneName` (always `"ME"`) to every single `CreateInput` call, and OBS's
+`CreateInput` adds the new input to whatever scene is passed **as a side effect** — so every new
+input across all four scenes landed an extra item in `ME`, on top of the separate `CreateSceneItem`
+op the compiler also issues for the item's actual scene, producing the exact duplicate ('Camera'
+twice in ME) that HANDOVER.md flagged as a risk, plus stray unrelated items in ME that never should
+have been there at all.
+
+**Fix**: `sceneCompiler.ts`'s `CreateInput` op now carries the `sceneName` the input is first used
+in (set by `compileScenePlan`, not a default), and skips the redundant `CreateSceneItem` for that
+same scene. `applyPlan.ts` now passes `op.sceneName` instead of `desired[0]?.sceneName`.
+`applyOpsToState`'s simulation was also corrected to mirror the same OBS side effect, so the
+dev-only convergence check stays honest. Verified live after the fix — same probe, on a freshly
+recreated test collection, produced (**correct**, no duplicates, no stray items):
+
+```
+scene ME:    items= [ 'Camera' ]
+scene TABLE: items= [ 'Table' ]
+scene BOTH:  items= [ 'Table', 'Camera' ]
+scene BREAK: items= [ 'BREAK Card' ]
+```
+
+A second `syncScenes` call against the same state produced zero additional ops (confirmed
+idempotent live, matching the existing unit-tested convergence property). Unit-tested in
+`tests/sceneCompiler.test.ts` (`CreateInput targets the scene the input is first used in...`),
+proving both that `CreateInput.sceneName` is the correct scene and that no duplicate
+`CreateSceneItem` op is emitted for it.
+
+### A hard problem found while trying to shut this session's OBS test instance down gracefully — graceful WM_CLOSE does not work on a tray-minimized OBS, at all
+
+This matters enormously given hard rule #1 ("never force-kill OBS"), so it is recorded in full.
+
+**What was tried**: `taskkill /PID <pid>` (no `/F`) — the same mechanism that successfully dismissed
+the Safe Mode dialog earlier in this session (see above) — sent twice, with waits of 20s, 30s and
+finally a further 30s (80+ seconds total) in between. `taskkill` reported `SUCCESS: Sent termination
+signal to the process with PID <pid>` both times. **OBS never exited.** Its process stayed alive
+throughout (confirmed via `tasklist`, memory usage fluctuating but the process present the whole
+time), and — decisively — **its own log file gained zero new lines** after the last websocket
+activity, i.e. OBS's event loop never even logged receiving or acting on a close request. Also tried:
+`GetHotkeyList` over the websocket, looking for any bindable "Quit"/"Exit" hotkey action to trigger
+via `TriggerHotkeyByName` — **there is none**; OBS's own hotkey system has no Quit/Exit action at all
+(confirmed by reading the full list — every `OBSBasic.*` action is stream/record/scene/preview
+related, nothing app-lifecycle).
+
+**Root cause (inferred from the evidence, not from reading OBS's source in this session)**: OBS's
+"minimize to tray" behaviour is gated by the single global `global.ini` `[BasicWindow] SysTrayEnabled`
+flag — which **must be `true`** for `--minimize-to-tray` to do anything at all (confirmed by the prior
+spike, FINDINGS.md's check 0). With that flag on, OBS appears to treat *any* request to close its
+main window — including a plain `WM_CLOSE`, not just a user clicking the visible X button — as "hide
+to tray" rather than "quit". There is no separate persisted setting that distinguishes "minimize to
+tray on close" from "tray icon enabled at all"; they are the same flag. The only way to reach OBS's
+real quit path is its own tray-icon context-menu "Exit" item (or File > Exit while the window is
+shown) — both are live GUI interactions this session was not going to attempt blindly against Khan's
+real desktop, and neither is reachable over obs-websocket.
+
+**This is not a new problem invented by this session — it was already hit and misdiagnosed by the
+prior spike.** Re-reading FINDINGS.md's own "Cleanup verification" section (HQ's correction, above):
+that spike's "graceful WM_CLOSE then force-kill fallback" **actually force-killed OBS every time** —
+the evidence is right there (`a safe_mode marker plus seven crash dumps, left by force-killing OBS`).
+The graceful path was never actually working; it was just never checked for, because the fallback
+silently absorbed every failure. This session caught it explicitly because the hard rule this time
+requires refusing the fallback rather than taking it.
+
+**What this session did instead, per the brief's own explicit instruction for exactly this case**
+("If ever unable, say so loudly in FINDINGS.md and delete the safe_mode marker if present before
+finishing"): did **not** force-kill. The "Whatnot Studio Test" OBS instance (pid 32340 at time of
+writing) was left running, in the tray, on the throwaway profile/collection only — it has never
+touched `Untitled`. **This needs a human hand on the tray icon** (right-click → Exit) to close
+cleanly; HQ/Khan should do that as part of accepting this work, and then confirm no `safe_mode`
+marker was left behind (there should not be one, since nothing force-killed it — the marker is
+written by OBS itself at *startup*, unconditionally, and cleared at clean exit only; it can only be
+present here if this specific instance's own eventual close, whoever performs it, is itself
+unclean).
+
+**Product implication, not fixed this session**: the app has no way to cleanly shut down the OBS
+instance it manages, at all, once minimized to tray, without a human clicking Exit on the tray icon
+itself. This is worth its own follow-up brief — candidates worth trying next: launching OBS
+*without* `SysTrayEnabled` for the specific case of a deliberate app-initiated shutdown (toggling the
+global.ini flag off, which is a live-editable file, then relaunching-then-closing once with the flag
+off, then restoring it — untested, adds real complexity and risk of leaving the flag in the wrong
+state if interrupted), or accepting that "Quit OBS" is a manual, human, tray-icon action for this
+product's whole lifetime and building the UI around that assumption instead.
+
+### Coordinator update — Whatnot Show Tools measured facts folded in
+
+Per `whatnot-show-tools-measured.md` (HQ, through Khan's own signed-in Chrome — not read myself,
+no browser opened this session):
+
+- **Show Tools URL fixed**: `SetupScreen.tsx` now opens `https://www.whatnot.com/dashboard/lives/setup`
+  (the old `/dashboard/livestream/setup` guess 404s).
+- **Chrome-specific launch implemented**: `electron/main.ts` now has `resolveChromePath()` (checks
+  the three standard Windows install locations) + `openInChrome()`, exposed as
+  `shell:openInChrome`/`window.whatnotStudio.openInChrome`, used only by the Show Tools button.
+  Falls back to `shell.openExternal` (OS default browser) if Chrome isn't found at any of those
+  paths — **this fallback path was not exercised live** (Chrome IS installed and found at the
+  standard path on this machine), so it is implemented but unverified; flagged in HANDOVER.md.
+- **Port 4455 already correct** — `DEFAULT_SHOW_CONFIG.obsPort` in `src/state/store.ts` was already
+  `4455`, no code change needed. (Also incidentally the exact port this whole session's live testing
+  used throughout.)
+- **1080x1920@30 already correct** — confirmed by this session's own item-1/item-2 measurements
+  above (`GetVideoSettings` read back exactly that), no code change, just the alignment recorded.
+- **The four manually-required Output settings** (Bitrate max 3500 Kbps, Keyframe Interval 2s, Rate
+  Control CBR, Tune zerolatency) — implemented as `applyWhatnotEncoderSettings` in `src/obs/firstRun.ts`,
+  called from `runFirstRunSetup`. See the long comment on that function for the full ownership-rule
+  exception reasoning. **Bitrate (`SimpleOutput/VBitrate` via `SetProfileParameter`) is measured live
+  and confirmed working** — read back 3500 after the call, against the real running OBS instance.
+  **Keyframe Interval / Tune are only written when the seller's `StreamEncoder` profile parameter is
+  already `x264`** (they are x264-only concepts; this machine's default encoder was `nvenc`, so the
+  x264 branch could only be confirmed to *write* the `x264Settings` custom-options field successfully,
+  not end-to-end against a live x264 stream). **Rate Control CBR needs no separate write** — OBS's
+  Simple output mode has no variable-bitrate option, so a fixed `VBitrate` already is CBR in effect.
+  `SetStreamServiceSettings` remains completely untouched, as does everything else in Output/Stream.
+- **OBS version warning implemented**: `checkObsVersionWarning(obsVersion)` (pure, unit-tested) warns
+  on any `32.x.x` build; wired into `runFirstRunSetup`'s return value as `versionWarning`. This
+  machine is 31.1.2, so the warning path itself could not be exercised against a real 32.x OBS —
+  confirmed live that it correctly stays silent on 31.1.2, and unit-tested for both branches against
+  the fake.
+- **Checklist item 7 (`StreamStateChanged` against a real show) remains HQ's**, not mine — Whatnot's
+  page showed "No Available Streams Found. Please Schedule one." No browser was opened by this
+  session to check this; taking HQ's report as given.

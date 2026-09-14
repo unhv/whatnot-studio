@@ -67,7 +67,19 @@ export interface CurrentObsState {
 export const EMPTY_OBS_STATE: CurrentObsState = { scenes: [], inputs: [] };
 
 export type ObsOp =
-  | { type: "CreateInput"; inputName: string; inputKind: string; inputSettings?: Record<string, unknown> }
+  // MEASURED 2026-09-15 (FINDINGS.md): OBS's own CreateInput adds the new
+  // input as a scene item to `sceneName` as a side effect. `sceneName` here
+  // must be the scene the input is *first* used in, not an arbitrary
+  // default -- passing the wrong scene (e.g. always desired[0]'s scene)
+  // was confirmed live to dump every new input's item into that one scene
+  // regardless of which scene actually needed it.
+  | {
+      type: "CreateInput";
+      inputName: string;
+      inputKind: string;
+      inputSettings?: Record<string, unknown>;
+      sceneName: string;
+    }
   | { type: "CreateScene"; sceneName: string }
   | { type: "CreateSceneItem"; sceneName: string; sourceName: string }
   | { type: "SetSceneItemTransform"; sceneName: string; sourceName: string; transform: Transform }
@@ -243,18 +255,25 @@ export function compileScenePlan(desired: DesiredScene[], current: CurrentObsSta
 
     for (const item of scene.items) {
       const existingInput = findInput(current, item.sourceName);
+      // Did *this* CreateInput op (if any is emitted below) already drop a
+      // scene item into `scene.sceneName` as OBS's own side effect? If so,
+      // the separate CreateSceneItem below must be skipped for this scene
+      // or OBS ends up with two items for the same source.
+      let createdIntoThisScene = false;
       if (!existingInput && !inputsCreatedThisPass.has(item.sourceName)) {
         ops.push({
           type: "CreateInput",
           inputName: item.sourceName,
           inputKind: item.sourceKind,
           inputSettings: item.inputSettings,
+          sceneName: scene.sceneName,
         });
         inputsCreatedThisPass.add(item.sourceName);
+        createdIntoThisScene = true;
       }
 
       const existingItem = findItem(currentScene, item.sourceName);
-      if (!existingItem) {
+      if (!existingItem && !createdIntoThisScene) {
         ops.push({ type: "CreateSceneItem", sceneName: scene.sceneName, sourceName: item.sourceName });
       }
 
@@ -300,11 +319,18 @@ export function applyOpsToState(current: CurrentObsState, ops: ObsOp[]): Current
 
   for (const op of ops) {
     switch (op.type) {
-      case "CreateInput":
+      case "CreateInput": {
         if (!inputs.find((i) => i.name === op.inputName)) {
           inputs.push({ name: op.inputName, kind: op.inputKind });
         }
+        // Mirrors OBS's own measured side effect: CreateInput also drops a
+        // scene item into its target scene.
+        const targetScene = getOrCreateScene(op.sceneName);
+        if (!targetScene.items.find((i) => i.sourceName === op.inputName)) {
+          targetScene.items.push({ sourceName: op.inputName, enabled: true });
+        }
         break;
+      }
       case "CreateScene":
         getOrCreateScene(op.sceneName);
         break;

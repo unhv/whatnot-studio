@@ -10,6 +10,7 @@ import {
   OBS_DIR,
   OBS_EXE,
   closeObs,
+  ensureWebsocketServerEnabled,
   waitForPort,
   type LaunchResult,
 } from "../../spike/obs-launcher.js";
@@ -28,7 +29,19 @@ export interface ProductLaunchOptions {
  * tray, updater disabled. Deliberately does not pass the OBS CLI flag
  * that would force the stream to start on launch — see src/obs/client.ts's
  * ownership-rule comment; this app never starts the stream itself.
+ *
+ * MEASURED 2026-09-15 (FINDINGS.md, supervised run): obs-websocket's
+ * persisted plugin_config/obs-websocket/config.json can have
+ * "server_enabled": false, and --websocket_port/--websocket_password/
+ * --websocket_ipv4_only only override the VALUES inside that config — they
+ * do not flip server_enabled to true. Without this call the websocket never
+ * opens and every first run times out waiting for the port, silently.
  */
+export async function launchObsForProductAsync(opts: ProductLaunchOptions): Promise<LaunchResult> {
+  await ensureWebsocketServerEnabled();
+  return launchObsForProduct(opts);
+}
+
 export function launchObsForProduct(opts: ProductLaunchOptions): LaunchResult {
   const profileName = opts.profileName ?? PROFILE_NAME;
   const args = [

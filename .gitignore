@@ -8,3 +8,5 @@ out/
 release/
 .pipeline/
 .git-commit-msg.txt
+
+scratch/

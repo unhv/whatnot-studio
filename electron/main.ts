@@ -15,10 +15,11 @@
  */
 import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, shell } from "electron";
 import { promises as fs } from "node:fs";
+import { execFile } from "node:child_process";
 import * as path from "node:path";
 import * as os from "node:os";
 import { fileURLToPath } from "node:url";
-import { closeObs, launchObsForProduct, waitForPort } from "../src/obs/launch.js";
+import { closeObs, launchObsForProductAsync, waitForPort } from "../src/obs/launch.js";
 import { profileDirName, sceneCollectionFileName } from "../src/obs/firstRun.js";
 import { PROFILE_NAME } from "../src/shared/types.js";
 
@@ -31,8 +32,50 @@ function firstRunPaths(profileName: string = PROFILE_NAME) {
   const file = sceneCollectionFileName(profileName);
   return {
     profileIniPath: path.join(OBS_APPDATA, "basic", "profiles", dir, "basic.ini"),
-    sceneCollectionJsonPath: path.join(OBS_APPDATA, "basic", "scene_collections", `${file}.json`),
+    sceneCollectionJsonPath: path.join(OBS_APPDATA, "basic", "scenes", `${file}.json`),
   };
+}
+
+// Whatnot's Show Tools page requires Chrome specifically ("Other Chromium
+// based browsers may work but are not guaranteed" -- measured 2026-09-15,
+// whatnot-show-tools-measured.md). Try the usual Windows install locations
+// before falling back to the OS default browser.
+const CHROME_CANDIDATE_PATHS = [
+  path.join(process.env["PROGRAMFILES"] ?? "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+  path.join(
+    process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)",
+    "Google",
+    "Chrome",
+    "Application",
+    "chrome.exe"
+  ),
+  path.join(process.env["LOCALAPPDATA"] ?? "", "Google", "Chrome", "Application", "chrome.exe"),
+];
+
+async function resolveChromePath(): Promise<string | null> {
+  for (const candidate of CHROME_CANDIDATE_PATHS) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // not at this location, try the next
+    }
+  }
+  return null;
+}
+
+/** Open a URL in Chrome specifically, falling back to the OS default
+ * browser (via shell.openExternal) if Chrome's path can't be resolved.
+ * The fallback case is recorded in FINDINGS.md rather than assumed away. */
+async function openInChrome(url: string): Promise<void> {
+  const chromePath = await resolveChromePath();
+  if (!chromePath) {
+    await shell.openExternal(url);
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    execFile(chromePath, [url], (err) => (err ? reject(err) : resolve()));
+  });
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -87,7 +130,7 @@ app.whenReady().then(() => {
   );
 
   ipcMain.handle("obs:launch", async (_event, opts: { port: number; password: string; profileName?: string }) => {
-    const { pid } = launchObsForProduct(opts);
+    const { pid } = await launchObsForProductAsync(opts);
     await waitForPort(opts.port);
     return { pid };
   });
@@ -98,6 +141,10 @@ app.whenReady().then(() => {
 
   ipcMain.handle("shell:openExternal", async (_event, url: string) => {
     await shell.openExternal(url);
+  });
+
+  ipcMain.handle("shell:openInChrome", async (_event, url: string) => {
+    await openInChrome(url);
   });
 
   ipcMain.handle("clipboard:write", (_event, text: string) => {

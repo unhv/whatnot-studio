@@ -76,8 +76,13 @@ export async function syncScenes(obs: ObsClient, desired: DesiredScene[]): Promi
   for (const op of ops) {
     switch (op.type) {
       case "CreateInput":
+        // MEASURED 2026-09-15: op.sceneName is the scene this input is
+        // first used in (set by the compiler), not an arbitrary default --
+        // OBS adds a scene item to whatever scene is passed here as a side
+        // effect, so passing the wrong one pollutes that scene with items
+        // that don't belong to it.
         await obs.call("CreateInput", {
-          sceneName: desired[0]?.sceneName, // OBS requires a scene target; first desired scene is a safe default holder
+          sceneName: op.sceneName,
           inputName: op.inputName,
           inputKind: op.inputKind,
           inputSettings: op.inputSettings ?? {},

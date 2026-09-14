@@ -22,6 +22,9 @@ const api = {
 
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke("shell:openExternal", url),
 
+  // Whatnot requires Chrome specifically for Show Tools -- see electron/main.ts.
+  openInChrome: (url: string): Promise<void> => ipcRenderer.invoke("shell:openInChrome", url),
+
   copyToClipboard: (text: string): Promise<void> => ipcRenderer.invoke("clipboard:write", text),
 
   onHotkey: (callback: (key: "F1" | "F2" | "F3" | "F4" | "F5") => void): (() => void) => {

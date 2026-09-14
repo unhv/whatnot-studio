@@ -136,6 +136,78 @@ export interface FirstRunResult {
   ok: boolean;
   reason?: string;
   pid?: number;
+  /** Plain-language warning, set when OBS reports a 32.x version -- Whatnot's
+   * Show Tools page warns every 32.x.x build needs the bitrate capped
+   * manually or shows fail to start (measured 2026-09-15,
+   * whatnot-show-tools-measured.md). Not testable live on this machine
+   * (31.1.2) -- only the version read + warning text is implemented. */
+  versionWarning?: string;
+}
+
+/** Pure — takes obs-websocket's own `obsVersion` string and returns a
+ * warning message for any 32.x.x build, or undefined otherwise. */
+export function checkObsVersionWarning(obsVersion: string): string | undefined {
+  if (/^32\./.test(obsVersion)) {
+    return (
+      `OBS ${obsVersion} detected. Whatnot's Show Tools warns that all 32.x.x OBS versions ` +
+      `need the stream bitrate capped manually or the show may fail to start.`
+    );
+  }
+  return undefined;
+}
+
+/**
+ * OWNERSHIP RULE EXCEPTION — documented and deliberate (HQ, 2026-09-15,
+ * whatnot-show-tools-measured.md). Whatnot's Show Tools page cannot apply
+ * four Output settings itself and instructs the seller to set them
+ * manually: Bitrate max 3500 Kbps (range 2500-3500), Keyframe Interval 2s,
+ * Rate Control CBR, Tune zerolatency. Since Whatnot's page never writes
+ * these itself, writing them here creates no conflict with the file-level
+ * ownership rule — `SetStreamServiceSettings` remains untouched forever,
+ * and so does everything else in Output/Stream.
+ *
+ * MEASURED 2026-09-15 live against a real OBS 31.1.2: `SimpleOutput/VBitrate`
+ * is a portable ini parameter, settable via `SetProfileParameter` and
+ * confirmed to apply regardless of which streaming encoder is selected
+ * (confirmed read-back: 2500 -> 3500). Keyframe Interval / Rate Control /
+ * Tune are properties of the x264 encoder specifically (OBS's NVENC/AMF/
+ * QuickSync encoders use different property names, e.g. NVENC has no
+ * "tune" concept at all) — they can only be safely written when the
+ * seller's own `SimpleOutput/StreamEncoder` is already x264, via the
+ * `x264Settings` custom-options ini field (confirmed writable, format
+ * `key=value key=value ...`). On this session's test machine the default
+ * `StreamEncoder` was `nvenc`, not `x264` — the x264 path below was
+ * exercised for the write only (confirmed the field accepts and persists
+ * the string), not end-to-end against a real x264 stream, and is not
+ * forced onto sellers using a different encoder. See HANDOVER.md.
+ */
+export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<void> {
+  await obs.call("SetProfileParameter", {
+    parameterCategory: "SimpleOutput",
+    parameterName: "VBitrate",
+    parameterValue: "3500",
+  });
+
+  const streamEncoder = await obs.call<{ parameterValue: string | null }>("GetProfileParameter", {
+    parameterCategory: "SimpleOutput",
+    parameterName: "StreamEncoder",
+  });
+
+  if (streamEncoder.parameterValue === "x264" || streamEncoder.parameterValue === "obs_x264") {
+    await obs.call("SetProfileParameter", {
+      parameterCategory: "SimpleOutput",
+      parameterName: "UseAdvanced",
+      parameterValue: "true",
+    });
+    await obs.call("SetProfileParameter", {
+      parameterCategory: "SimpleOutput",
+      parameterName: "x264Settings",
+      parameterValue: "keyint=2 tune=zerolatency",
+    });
+  }
+  // Rate Control CBR: OBS's Simple output mode always streams at the fixed
+  // VBitrate set above (no variable-bitrate option exists in Simple mode),
+  // which is CBR in effect — no separate write is needed or attempted.
 }
 
 export interface FirstRunDeps {
@@ -179,6 +251,9 @@ export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResu
     return { ok: false, reason: verify.reason, pid };
   }
 
+  const version = await obs.call<{ obsVersion: string }>("GetVersion");
+  const versionWarning = checkObsVersionWarning(version.obsVersion);
+
   await obs.call("SetVideoSettings", {
     baseWidth: CANVAS_WIDTH,
     baseHeight: CANVAS_HEIGHT,
@@ -187,6 +262,7 @@ export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResu
     fpsNumerator: 30,
     fpsDenominator: 1,
   });
+  await applyWhatnotEncoderSettings(obs);
   await obs.disconnect();
 
   // The canvas setting only takes effect for Whatnot's health check after a
@@ -196,5 +272,5 @@ export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResu
   const obs2 = await deps.connect();
   await obs2.disconnect();
 
-  return { ok: true, pid: relaunched.pid };
+  return { ok: true, pid: relaunched.pid, versionWarning };
 }

@@ -61,6 +61,42 @@ describe("compileScenePlan", () => {
     }
   });
 
+  it(
+    "CreateInput targets the scene the input is first used in, and never emits a " +
+      "duplicate CreateSceneItem for that same scene",
+    () => {
+      // MEASURED 2026-09-15 (FINDINGS.md): OBS's real CreateInput adds the new
+      // input as a scene item to whatever sceneName is passed, as a side
+      // effect. Confirmed live: passing the wrong scene there (or always the
+      // same default scene) left every new input's first item in the wrong
+      // scene, and a duplicate copy in the scene it should have been in.
+      const desired = buildDesiredScenes(config);
+      const ops = compileScenePlan(desired, EMPTY_OBS_STATE);
+
+      const webcamCreate = ops.find((o) => o.type === "CreateInput" && o.inputName === "Webcam");
+      expect(webcamCreate).toMatchObject({ type: "CreateInput", sceneName: "ME" });
+
+      // ME is Webcam's first scene -- CreateInput already puts the item there,
+      // so no separate CreateSceneItem should be emitted for ME/Webcam.
+      const meWebcamCreateSceneItem = ops.find(
+        (o) => o.type === "CreateSceneItem" && o.sceneName === "ME" && o.sourceName === "Webcam"
+      );
+      expect(meWebcamCreateSceneItem).toBeUndefined();
+
+      // BOTH also uses Webcam (as the inset) -- that scene genuinely needs its
+      // own CreateSceneItem, since CreateInput's side effect only landed one
+      // item, in ME.
+      const bothWebcamCreateSceneItem = ops.find(
+        (o) => o.type === "CreateSceneItem" && o.sceneName === "BOTH" && o.sourceName === "Webcam"
+      );
+      expect(bothWebcamCreateSceneItem).toBeDefined();
+
+      const afterState = applyOpsToState(EMPTY_OBS_STATE, ops);
+      const meScene = afterState.scenes.find((s) => s.name === "ME")!;
+      expect(meScene.items.filter((i) => i.sourceName === "Webcam").length).toBe(1);
+    }
+  );
+
   it("only touches the changed field when one item's transform drifts", () => {
     const desired = buildDesiredScenes(config);
     const firstOps = compileScenePlan(desired, EMPTY_OBS_STATE);
