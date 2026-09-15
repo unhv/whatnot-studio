@@ -31,6 +31,12 @@ import {
   WHATNOT_SAFE_TOP,
 } from "../src/obs/sceneCompiler.js";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, type ShowConfig } from "../src/shared/types.js";
+import {
+  bothCameraTransforms,
+  cameraLayoutReducer,
+  DEFAULT_CAMERA_LAYOUT,
+  transformInsideCanvas,
+} from "../src/state/cameraLayout.js";
 
 const config: ShowConfig = {
   showName: "Test Show",
@@ -289,6 +295,51 @@ describe("buildDesiredScenes", () => {
     expect(huge.width).toBeLessThanOrEqual(CANVAS_WIDTH);
     expect(small.height).toBeLessThan(normal.height);
     expect(huge.height).toBeGreaterThan(normal.height);
+  });
+
+  it("BOTH split layout gives each camera half the canvas height", () => {
+    const split = cameraLayoutReducer(DEFAULT_CAMERA_LAYOUT, { type: "SET_KIND", kind: "split" });
+    const desired = buildDesiredScenes(config, undefined, split);
+    const both = desired.find((s) => s.sceneName === "BOTH")!;
+    const table = both.items.find((i) => i.sourceName === "Capture Card")!;
+    const webcam = both.items.find((i) => i.sourceName === "Webcam")!;
+    expect(table.transform).toEqual(bothCameraTransforms(split).table);
+    expect(webcam.transform).toEqual(bothCameraTransforms(split).webcam);
+    expect(table.transform.positionY).toBe(0);
+    expect(webcam.transform.positionY).toBe(CANVAS_HEIGHT / 2);
+    expect(transformInsideCanvas(table.transform)).toBe(true);
+    expect(transformInsideCanvas(webcam.transform)).toBe(true);
+    const ops = compileScenePlan(desired, EMPTY_OBS_STATE).filter(
+      (o) => o.type === "SetSceneItemTransform" && o.sceneName === "BOTH"
+    );
+    expect(ops).toEqual(
+      expect.arrayContaining([
+        {
+          type: "SetSceneItemTransform",
+          sceneName: "BOTH",
+          sourceName: "Capture Card",
+          transform: table.transform,
+        },
+        {
+          type: "SetSceneItemTransform",
+          sceneName: "BOTH",
+          sourceName: "Webcam",
+          transform: webcam.transform,
+        },
+      ])
+    );
+    expect(CANVAS_WIDTH).toBe(1080);
+  });
+
+  it("BOTH swap puts the webcam on the full canvas and the table in the inset", () => {
+    const swapped = cameraLayoutReducer(DEFAULT_CAMERA_LAYOUT, { type: "SWAP" });
+    const both = buildDesiredScenes(config, undefined, swapped).find((s) => s.sceneName === "BOTH")!;
+    const webcam = both.items.find((i) => i.sourceName === "Webcam")!;
+    const table = both.items.find((i) => i.sourceName === "Capture Card")!;
+    expect(webcam.transform).toEqual(fullCanvasFillTransform());
+    expect(table.transform).toEqual(bothCameraTransforms(swapped).table);
+    expect(both.items[0].sourceName).toBe("Webcam");
+    expect(both.items[1].sourceName).toBe("Capture Card");
   });
 
   it("creates each overlay input once and leaves it disabled after a full compile", () => {

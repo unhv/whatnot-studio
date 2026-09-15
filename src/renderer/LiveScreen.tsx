@@ -12,6 +12,7 @@ import {
   startLiveScreenSession,
 } from "./liveScreenSession.js";
 import AudioPanel from "./AudioPanel.js";
+import CameraLayoutPanel from "./CameraLayoutPanel.js";
 import TextPlacementControl, { useTextStyleSession } from "./TextPlacementControl.js";
 
 const SCENE_HOTKEYS: Record<SceneKey, string> = { ME: "F1", TABLE: "F2", BOTH: "F3", BREAK: "F4" };
@@ -223,6 +224,8 @@ export default function LiveScreen() {
       </button>
 
       <AudioPanel />
+
+      <CameraLayoutPanel />
     </div>
   );
 }

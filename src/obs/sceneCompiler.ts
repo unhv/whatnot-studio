@@ -12,6 +12,11 @@
  */
 import { computeCropToFill, type CropToFill } from "../../spike/lib.js";
 import {
+  bothCameraTransforms,
+  DEFAULT_CAMERA_LAYOUT,
+  type CameraLayout,
+} from "../state/cameraLayout.js";
+import {
   ASSUMED_SOURCE_HEIGHT,
   ASSUMED_SOURCE_WIDTH,
   CANVAS_HEIGHT,
@@ -445,10 +450,13 @@ function cameraFacingOverlays(): DesiredSceneItem[] {
 /** Build the desired four-scene model from a ShowConfig. Pure — no OBS.
  * `overlayVisible.breakCard` is the seller's show/hide; omit it and BREAK
  * still comes up with BE RIGHT BACK on. Item bar / SOLD stay compiled
- * disabled — those flags belong to the SHOW/CLEAR/SOLD path. */
+ * disabled — those flags belong to the SHOW/CLEAR/SOLD path.
+ * `bothLayout` only affects the BOTH scene's camera transforms. Live apply
+ * must pass the persisted layout; the default is the stock inset. */
 export function buildDesiredScenes(
   config: ShowConfig,
-  overlayVisible?: Partial<Record<TextOverlayId, boolean>>
+  overlayVisible?: Partial<Record<TextOverlayId, boolean>>,
+  bothLayout: CameraLayout = DEFAULT_CAMERA_LAYOUT
 ): DesiredScene[] {
   const cameraName = config.camera?.label ?? "Camera";
   const tableName = config.captureCard?.label ?? cameraName;
@@ -488,33 +496,28 @@ export function buildDesiredScenes(
     ],
   };
 
-  // BOTH: table fills the canvas as background, me sits in a small inset
-  // bottom-right, padded 24px off both edges. Overlays sit on top.
-  const insetW = Math.round(CANVAS_WIDTH * 0.32);
-  const insetTileH = Math.round(insetW * (16 / 9)); // portrait inset tile, matches canvas orientation
-  const pad = 24;
+  // BOTH: camera transforms come from the named layout. Main sits under
+  // the inset so the small camera stays visible; overlays sit on top.
+  const bothT = bothCameraTransforms(bothLayout);
+  const tableItem: DesiredSceneItem = {
+    sourceName: tableName,
+    sourceKind: "dshow_input",
+    transform: bothT.table,
+    enabled: true,
+  };
+  const cameraItem: DesiredSceneItem = {
+    sourceName: cameraName,
+    sourceKind: "dshow_input",
+    transform: bothT.webcam,
+    enabled: true,
+  };
+  const camerasFirst =
+    bothLayout.kind === "split" || bothLayout.main === "table"
+      ? [tableItem, cameraItem]
+      : [cameraItem, tableItem];
   const bothScene: DesiredScene = {
     sceneName: "BOTH",
-    items: [
-      {
-        sourceName: tableName,
-        sourceKind: "dshow_input",
-        transform: full,
-        enabled: true,
-      },
-      {
-        sourceName: cameraName,
-        sourceKind: "dshow_input",
-        transform: tileFillTransform(
-          insetW,
-          insetTileH,
-          CANVAS_WIDTH - insetW - pad,
-          CANVAS_HEIGHT - insetTileH - pad
-        ),
-        enabled: true,
-      },
-      ...overlays,
-    ],
+    items: [...camerasFirst, ...overlays],
   };
 
   const breakScene: DesiredScene = {

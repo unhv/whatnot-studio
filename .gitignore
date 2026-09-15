@@ -10,3 +10,4 @@ release/
 .git-commit-msg.txt
 
 scratch/
+.playwright-mcp/

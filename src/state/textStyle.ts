@@ -5,6 +5,7 @@
  */
 import { syncScenes } from "../obs/applyPlan.js";
 import type { ObsClient } from "../obs/client.js";
+import { loadCameraLayout } from "./cameraLayout.js";
 import {
   buildDesiredScenes,
   clampOverlayPosition,
@@ -374,7 +375,11 @@ export class TextStyleObsSync {
     try {
       const itemBar = useAppStore.getState().itemBar;
       const overlays = this.lastState.overlays;
-      const desired = buildDesiredScenes(config, { breakCard: overlays.breakCard.visible });
+      const desired = buildDesiredScenes(
+        config,
+        { breakCard: overlays.breakCard.visible },
+        loadCameraLayout(typeof localStorage === "undefined" ? null : localStorage)
+      );
       const line = itemBarLine(itemBar) ?? "";
       for (const scene of desired) {
         for (const item of scene.items) {

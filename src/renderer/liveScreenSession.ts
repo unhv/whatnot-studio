@@ -2,7 +2,17 @@ import { subscribeObsLiveState, type LiveState } from "../obs/liveMode.js";
 import { syncScenes } from "../obs/applyPlan.js";
 import type { ObsClient } from "../obs/client.js";
 import { buildDesiredScenes } from "../obs/sceneCompiler.js";
+import { loadCameraLayout, type StorageLike } from "../state/cameraLayout.js";
+import { loadTextStyle } from "../state/textStyle.js";
 import { useAppStore } from "../state/store.js";
+
+function browserLayoutStorage(): StorageLike | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
 
 export const STUDIO_RETRY_MS = 2000;
 
@@ -34,11 +44,25 @@ export function startLiveScreenSession(opts: {
   retryMs?: number;
   /** Override for tests. Default applies `buildDesiredScenes` once per session. */
   applyScenes?: (client: Pick<ObsClient, "call">) => Promise<void>;
+  /** Injected storage for the persisted BOTH layout. Default is localStorage. */
+  layoutStorage?: StorageLike | null;
 }): { stop: () => void; retryNow: () => void } {
   const { client, url, password, retryMs = STUDIO_RETRY_MS } = opts;
   const applyScenes =
     opts.applyScenes ??
-    ((obs) => syncScenes(obs as ObsClient, buildDesiredScenes(useAppStore.getState().showConfig)));
+    ((obs) => {
+      const config = useAppStore.getState().showConfig;
+      return syncScenes(
+        obs as ObsClient,
+        buildDesiredScenes(
+          config,
+          { breakCard: loadTextStyle(config.showName).overlays.breakCard.visible },
+          loadCameraLayout(
+            opts.layoutStorage !== undefined ? opts.layoutStorage : browserLayoutStorage()
+          )
+        )
+      );
+    });
   let cancelled = false;
   let inFlight = false;
   let scenesApplied = false;

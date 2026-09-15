@@ -14,6 +14,24 @@ import {
   startLiveScreenSession,
 } from "../src/renderer/liveScreenSession.js";
 import { ITEM_BAR_SOURCE, SOLD_BANNER_SOURCE } from "../src/obs/sceneCompiler.js";
+import {
+  bothCameraTransforms,
+  cameraLayoutReducer,
+  DEFAULT_CAMERA_LAYOUT,
+  persistCameraLayout,
+  type StorageLike,
+} from "../src/state/cameraLayout.js";
+import { DEFAULT_SHOW_CONFIG } from "../src/state/store.js";
+
+class MemoryStorage implements StorageLike {
+  private data = new Map<string, string>();
+  getItem(key: string): string | null {
+    return this.data.has(key) ? this.data.get(key)! : null;
+  }
+  setItem(key: string, value: string): void {
+    this.data.set(key, value);
+  }
+}
 
 function event(outputState: string, outputActive: boolean): StreamStateChangedEvent {
   return { outputActive, outputState };
@@ -246,6 +264,97 @@ describe("LiveScreen session — studio socket drop", () => {
     );
     expect(overlayEnables.length).toBeGreaterThan(0);
     session.stop();
+  });
+
+  it("applies the persisted BOTH layout on first connect, not the stock inset", async () => {
+    const twoCameras = {
+      ...DEFAULT_SHOW_CONFIG,
+      camera: { deviceId: "cam-1", label: "Webcam" },
+      captureCard: { deviceId: "cap-1", label: "Capture Card" },
+      mic: { deviceId: "mic-1", label: "Microphone" },
+    };
+    useAppStore.setState({ showConfig: twoCameras });
+
+    const storage = new MemoryStorage();
+    const layout = cameraLayoutReducer(
+      cameraLayoutReducer(DEFAULT_CAMERA_LAYOUT, { type: "SET_KIND", kind: "split" }),
+      { type: "SWAP" }
+    );
+    persistCameraLayout(layout, storage);
+    const expected = bothCameraTransforms(layout);
+    const stock = bothCameraTransforms(DEFAULT_CAMERA_LAYOUT);
+
+    const scenes = new Map<string, { sourceName: string; sceneItemId: number }[]>();
+    scenes.set("Scene", []);
+    const inputs: { inputName: string; inputKind: string }[] = [];
+    let nextId = 1;
+
+    const client = new FakeObsClient({
+      GetSceneList: () => ({ scenes: [...scenes.keys()].map((sceneName) => ({ sceneName })) }),
+      GetInputList: () => ({ inputs: [...inputs] }),
+      GetSceneItemList: (data?: Record<string, unknown>) => ({
+        sceneItems: (scenes.get(String(data?.sceneName)) ?? []).map((i) => ({
+          sourceName: i.sourceName,
+          sceneItemId: i.sceneItemId,
+          sceneItemEnabled: false,
+        })),
+      }),
+      GetSceneItemId: (data?: Record<string, unknown>) => {
+        const list = scenes.get(String(data?.sceneName)) ?? [];
+        const item = list.find((i) => i.sourceName === String(data?.sourceName));
+        if (!item) throw new Error("missing scene item");
+        return { sceneItemId: item.sceneItemId };
+      },
+      CreateScene: (data?: Record<string, unknown>) => {
+        const name = String(data?.sceneName);
+        if (!scenes.has(name)) scenes.set(name, []);
+        return {};
+      },
+      CreateInput: (data?: Record<string, unknown>) => {
+        const inputName = String(data?.inputName);
+        const sceneName = String(data?.sceneName);
+        inputs.push({ inputName, inputKind: String(data?.inputKind) });
+        const list = scenes.get(sceneName) ?? [];
+        list.push({ sourceName: inputName, sceneItemId: nextId++ });
+        scenes.set(sceneName, list);
+        return {};
+      },
+      CreateSceneItem: (data?: Record<string, unknown>) => {
+        const sceneName = String(data?.sceneName);
+        const sourceName = String(data?.sourceName);
+        const list = scenes.get(sceneName) ?? [];
+        list.push({ sourceName, sceneItemId: nextId++ });
+        scenes.set(sceneName, list);
+        return {};
+      },
+      SetSceneItemTransform: {},
+      SetSceneItemEnabled: {},
+    });
+
+    const session = startLiveScreenSession({
+      client,
+      url: "ws://127.0.0.1:4455",
+      password: "",
+      layoutStorage: storage,
+    });
+    await waitUntil(() => useAppStore.getState().connectionStatus === "connected");
+
+    const bothTransforms = client.calls.filter(
+      (c) => c.requestType === "SetSceneItemTransform" && c.requestData?.sceneName === "BOTH"
+    );
+    const bySource = (name: string) => {
+      const list = scenes.get("BOTH") ?? [];
+      const id = list.find((i) => i.sourceName === name)?.sceneItemId;
+      return bothTransforms.find((c) => c.requestData?.sceneItemId === id)?.requestData
+        ?.sceneItemTransform;
+    };
+    expect(bySource("Capture Card")).toEqual(expected.table);
+    expect(bySource("Webcam")).toEqual(expected.webcam);
+    expect(bySource("Capture Card")).not.toEqual(stock.table);
+    expect(bySource("Webcam")).not.toEqual(stock.webcam);
+
+    session.stop();
+    useAppStore.setState({ showConfig: DEFAULT_SHOW_CONFIG });
   });
 
   it("retries the scene plan on the next connect if the first apply throws", async () => {
