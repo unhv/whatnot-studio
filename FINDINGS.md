@@ -544,14 +544,43 @@ no browser opened this session):
 - **The four manually-required Output settings** (Bitrate max 3500 Kbps, Keyframe Interval 2s, Rate
   Control CBR, Tune zerolatency) — implemented as `applyWhatnotEncoderSettings` in `src/obs/firstRun.ts`,
   called from `runFirstRunSetup`. See the long comment on that function for the full ownership-rule
-  exception reasoning. **Bitrate (`SimpleOutput/VBitrate` via `SetProfileParameter`) is measured live
-  and confirmed working** — read back 3500 after the call, against the real running OBS instance.
-  **Keyframe Interval / Tune are only written when the seller's `StreamEncoder` profile parameter is
-  already `x264`** (they are x264-only concepts; this machine's default encoder was `nvenc`, so the
-  x264 branch could only be confirmed to *write* the `x264Settings` custom-options field successfully,
-  not end-to-end against a live x264 stream). **Rate Control CBR needs no separate write** — OBS's
-  Simple output mode has no variable-bitrate option, so a fixed `VBitrate` already is CBR in effect.
-  `SetStreamServiceSettings` remains completely untouched, as does everything else in Output/Stream.
+  exception reasoning.
+  > **CORRECTION — 2026-09-15, against the profile OBS actually wrote to disk.** The earlier claim
+  > that **bitrate (`SimpleOutput/VBitrate`) was "measured live and confirmed working"** overstated
+  > what the read-back proved. Reading `3500` back after `SetProfileParameter` proves the value was
+  > **stored** in `[SimpleOutput]`. It does **not** prove the value **governs the encode**. The
+  > profile on disk had `Mode=Simple`, which is the only reason `[SimpleOutput]` was in force at
+  > all. Whatnot's Required Settings panel opens on **Output Mode: Advanced**, and Whatnot's
+  > "update profile" button sets Advanced; in Advanced mode OBS reads `[AdvOut]` and the encoder
+  > JSON, and `[SimpleOutput]` is ignored entirely. Same session: `UseAdvanced=false` and
+  > `StreamEncoder=nvenc`, so the x264 keyframe/tune path never ran end-to-end in the product.
+  > A second defect in the same write: `x264Settings` was `keyint=2 tune=zerolatency`. x264's
+  > `keyint` is in **frames**, not seconds; at 30 fps a 2-second interval is `keyint=60`. `keyint=2`
+  > emits a keyframe every 2 frames (15 per second) and destroys the 3500 Kbps budget. The live
+  > probe (`scratch/probe6_x264settings.ts`) had `keyint=60` and the on-disk profile reads
+  > `x264Settings=keyint=60 tune=zerolatency` — the correct value was measured, then the wrong one
+  > was written into the product.
+  >
+  > **What the function does now:** reads `Output/Mode` first and never writes it (Whatnot's page
+  > owns the mode flip). `SimpleOutput/VBitrate` is written always (that key governs Simple
+  > encode). `UseAdvanced` + `x264Settings=keyint=<2*fps> tune=zerolatency` are written only to
+  > `SimpleOutput`, and only when *that category's* `StreamEncoder` is already x264 —
+  > `AdvOut/Encoder` is a separate id (this machine: Untitled AdvOut=`obs_nvenc_h264_tex`,
+  > Whatnot Studio Test AdvOut=`obs_x264`) and does not get Simple's x264Settings copied onto it.
+  > Advanced encode is **not** `AdvOut/VBitrate`: the live test profile has no such key, and
+  > `[AdvOut]` plus `streamEncoder.json` is what OBS reads after Whatnot sets Mode=Advanced.
+  > `SetProfileParameter` cannot populate that JSON, so first-run writes
+  > `streamEncoder.json` (`bitrate=3500`, `keyint_sec=2`, `rate_control=CBR`,
+  > `tune=zerolatency`) next to `basic.ini`, including once after OBS exits so a relaunch
+  > actually loads it. `keyint` in Simple x264Settings is derived as `2 * fps` from
+  > `GetVideoSettings` (canvas fallback 30); Advanced uses `keyint_sec` in seconds. nvenc is
+  > not treated as an edge case: bitrate (and the encoder JSON) are still written,
+  > x264-only ini keys are skipped, and `encoderWarning` says so if the current encoder *or*
+  > `AdvOut/Encoder` is not x264 — otherwise keyint/tune would silently stop applying after
+  > Whatnot's mode flip.
+  **Rate Control CBR needs no separate write** — a fixed `VBitrate` already is CBR in effect.
+  `SetStreamServiceSettings` remains completely untouched, as does `Output/Mode` and everything
+  else in Output/Stream.
 - **OBS version warning implemented**: `checkObsVersionWarning(obsVersion)` (pure, unit-tested) warns
   on any `32.x.x` build; wired into `runFirstRunSetup`'s return value as `versionWarning`. This
   machine is 31.1.2, so the warning path itself could not be exercised against a real 32.x OBS —

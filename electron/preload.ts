@@ -3,16 +3,19 @@ import { contextBridge, ipcRenderer } from "electron";
 export interface FirstRunPaths {
   profileIniPath: string;
   sceneCollectionJsonPath: string;
+  streamEncoderJsonPath: string;
 }
 
 const api = {
   firstRunPaths: (profileName?: string): Promise<FirstRunPaths> => ipcRenderer.invoke("firstRun:paths", profileName),
 
   writeFirstRunFiles: (args: {
-    profileIniPath: string;
-    sceneCollectionJsonPath: string;
-    profileIni: string;
-    sceneCollectionJson: string;
+    profileIniPath?: string;
+    sceneCollectionJsonPath?: string;
+    profileIni?: string;
+    sceneCollectionJson?: string;
+    streamEncoderJsonPath?: string;
+    streamEncoderJson?: string;
   }): Promise<void> => ipcRenderer.invoke("firstRun:writeFiles", args),
 
   launchObs: (opts: { port: number; password: string; profileName?: string }): Promise<{ pid: number }> =>

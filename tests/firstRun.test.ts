@@ -3,8 +3,11 @@ import {
   applyWhatnotEncoderSettings,
   buildFirstRunProfileIni,
   buildSceneCollectionSkeleton,
+  buildWhatnotStreamEncoderJson,
   checkObsVersionWarning,
+  keyintForIntervalSec,
   runFirstRunSetup,
+  streamEncoderJsonPathFromProfileIni,
   verifyProfileAndCollection,
   type FirstRunDeps,
   type ProfileListResult,
@@ -12,6 +15,42 @@ import {
 } from "../src/obs/firstRun.js";
 import { readIniSection } from "../spike/lib.js";
 import { FakeObsClient } from "./testUtils/fakeObsClient.js";
+
+function profileParams(
+  opts: {
+    mode?: string | null;
+    encoder?: string | null;
+    simpleEncoder?: string | null;
+    advEncoder?: string | null;
+  } = {}
+) {
+  const mode = opts.mode === undefined ? "Simple" : opts.mode;
+  const simpleEncoder = opts.simpleEncoder === undefined ? (opts.encoder ?? "nvenc") : opts.simpleEncoder;
+  const advEncoder = opts.advEncoder === undefined ? (opts.encoder ?? "nvenc") : opts.advEncoder;
+  return (data?: Record<string, unknown>) => {
+    const category = data?.parameterCategory;
+    const name = data?.parameterName;
+    if (name === "Mode") return { parameterValue: mode };
+    if (category === "AdvOut" && (name === "Encoder" || name === "StreamEncoder")) {
+      return { parameterValue: advEncoder };
+    }
+    if (category === "SimpleOutput" && (name === "StreamEncoder" || name === "Encoder")) {
+      return { parameterValue: simpleEncoder };
+    }
+    if (name === "StreamEncoder" || name === "Encoder") return { parameterValue: simpleEncoder };
+    return { parameterValue: null };
+  };
+}
+
+function setParamCalls(client: FakeObsClient, parameterName: string) {
+  return client.calls.filter(
+    (c) => c.requestType === "SetProfileParameter" && c.requestData?.parameterName === parameterName
+  );
+}
+
+function videoSettings(fpsNumerator = 30, fpsDenominator = 1) {
+  return { fpsNumerator, fpsDenominator };
+}
 
 describe("verifyProfileAndCollection", () => {
   it("passes when both current names match", () => {
@@ -77,28 +116,145 @@ describe("checkObsVersionWarning", () => {
   });
 });
 
+describe("buildWhatnotStreamEncoderJson", () => {
+  it("puts Advanced bitrate/keyint/CBR/tune on the encoder JSON keys OBS actually reads", () => {
+    expect(buildWhatnotStreamEncoderJson()).toEqual({
+      bitrate: 3500,
+      keyint_sec: 2,
+      rate_control: "CBR",
+      tune: "zerolatency",
+    });
+  });
+});
+
 describe("applyWhatnotEncoderSettings", () => {
-  it("always caps the bitrate at 3500, regardless of encoder", async () => {
+  it("always caps SimpleOutput/VBitrate at 3500, regardless of encoder", async () => {
     const client = new FakeObsClient({
       SetProfileParameter: {},
-      GetProfileParameter: { parameterValue: "nvenc" },
+      GetProfileParameter: profileParams({ encoder: "nvenc" }),
+      GetVideoSettings: videoSettings(),
     });
     await applyWhatnotEncoderSettings(client);
-    const bitrateCall = client.calls.find(
-      (c) => c.requestType === "SetProfileParameter" && c.requestData?.parameterName === "VBitrate"
-    );
-    expect(bitrateCall?.requestData?.parameterValue).toBe("3500");
+    const bitrateCalls = setParamCalls(client, "VBitrate");
+    expect(bitrateCalls.length).toBeGreaterThan(0);
+    expect(bitrateCalls.every((c) => c.requestData?.parameterValue === "3500")).toBe(true);
+    expect(bitrateCalls.every((c) => c.requestData?.parameterCategory === "SimpleOutput")).toBe(true);
   });
 
-  it("never writes x264-only settings for a non-x264 encoder", async () => {
+  it("never writes x264-only settings for a non-x264 encoder, and says so", async () => {
     const client = new FakeObsClient({
       SetProfileParameter: {},
-      GetProfileParameter: { parameterValue: "nvenc" },
+      GetProfileParameter: profileParams({ encoder: "nvenc" }),
+      GetVideoSettings: videoSettings(),
     });
-    await applyWhatnotEncoderSettings(client);
+    const result = await applyWhatnotEncoderSettings(client);
     expect(client.calls.some((c) => c.requestType === "SetProfileParameter" && c.requestData?.parameterName === "x264Settings")).toBe(
       false
     );
+    expect(result.encoderWarning).toMatch(/nvenc/);
+    expect(result.encoderWarning).toMatch(/not x264/);
+    expect(result.encoderWarning).toMatch(/3500/);
+  });
+
+  it("pins x264 keyint to 2 * fps (frames, not seconds)", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ mode: "Simple", encoder: "x264" }),
+      GetVideoSettings: videoSettings(30, 1),
+    });
+    await applyWhatnotEncoderSettings(client);
+    const x264Calls = setParamCalls(client, "x264Settings");
+    expect(x264Calls.length).toBeGreaterThan(0);
+    for (const call of x264Calls) {
+      expect(call.requestData?.parameterValue).toBe("keyint=60 tune=zerolatency");
+    }
+  });
+
+  it("derives keyint from GetVideoSettings when the canvas is not 30 fps", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ mode: "Simple", encoder: "obs_x264" }),
+      GetVideoSettings: videoSettings(60, 1),
+    });
+    await applyWhatnotEncoderSettings(client);
+    const x264Call = setParamCalls(client, "x264Settings")[0];
+    expect(x264Call?.requestData?.parameterValue).toBe(`keyint=${2 * 60} tune=zerolatency`);
+    expect(keyintForIntervalSec(60, 1)).toBe(120);
+  });
+
+  it("writes SimpleOutput ini keys when the profile is in Simple mode, not AdvOut", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ mode: "Simple", encoder: "x264" }),
+      GetVideoSettings: videoSettings(),
+    });
+    await applyWhatnotEncoderSettings(client);
+    expect(
+      client.calls.some(
+        (c) =>
+          c.requestType === "GetProfileParameter" &&
+          c.requestData?.parameterCategory === "Output" &&
+          c.requestData?.parameterName === "Mode"
+      )
+    ).toBe(true);
+    const bitrateCalls = setParamCalls(client, "VBitrate");
+    expect(bitrateCalls.map((c) => c.requestData?.parameterCategory)).toEqual(["SimpleOutput"]);
+    const x264Calls = setParamCalls(client, "x264Settings");
+    expect(x264Calls.map((c) => c.requestData?.parameterCategory)).toEqual(["SimpleOutput"]);
+    expect(client.calls.some((c) => c.requestData?.parameterCategory === "AdvOut" && c.requestType === "SetProfileParameter")).toBe(
+      false
+    );
+  });
+
+  it("does not SetProfileParameter AdvOut/VBitrate — Advanced encode is streamEncoder.json", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ mode: "Advanced", encoder: "obs_x264" }),
+      GetVideoSettings: videoSettings(30, 1),
+    });
+    await applyWhatnotEncoderSettings(client);
+    const advWrites = client.calls.filter(
+      (c) => c.requestType === "SetProfileParameter" && c.requestData?.parameterCategory === "AdvOut"
+    );
+    expect(advWrites).toEqual([]);
+    const bitrateCall = setParamCalls(client, "VBitrate")[0];
+    expect(bitrateCall?.requestData?.parameterCategory).toBe("SimpleOutput");
+    expect(bitrateCall?.requestData?.parameterValue).toBe("3500");
+  });
+
+  it("does not mirror Simple x264Settings onto AdvOut when AdvOut/Encoder is nvenc, and says so", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({
+        mode: "Simple",
+        simpleEncoder: "x264",
+        advEncoder: "nvenc",
+      }),
+      GetVideoSettings: videoSettings(),
+    });
+    const result = await applyWhatnotEncoderSettings(client);
+    const x264Calls = setParamCalls(client, "x264Settings");
+    expect(x264Calls.map((c) => c.requestData?.parameterCategory)).toEqual(["SimpleOutput"]);
+    expect(x264Calls[0]?.requestData?.parameterValue).toBe("keyint=60 tune=zerolatency");
+    expect(result.encoderWarning).toMatch(/nvenc/);
+    expect(result.encoderWarning).toMatch(/not x264/);
+  });
+
+  it("does not write Output/Mode", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ mode: "Simple", encoder: "nvenc" }),
+      GetVideoSettings: videoSettings(),
+    });
+    await applyWhatnotEncoderSettings(client);
+    expect(
+      client.calls.some(
+        (c) =>
+          c.requestType === "SetProfileParameter" &&
+          c.requestData?.parameterCategory === "Output" &&
+          c.requestData?.parameterName === "Mode"
+      )
+    ).toBe(false);
   });
 });
 
@@ -125,7 +281,17 @@ function fakeFs() {
 describe("runFirstRunSetup", () => {
   it("writes the profile/collection files, verifies, sets the canvas, then restarts", async () => {
     const { fs, written } = fakeFs();
-    const closeObs = vi.fn(async () => {});
+    const events: string[] = [];
+    const trackingFs = {
+      ...fs,
+      async writeFile(filePath: string, contents: string) {
+        events.push(`write:${filePath}`);
+        await fs.writeFile(filePath, contents);
+      },
+    };
+    const closeObs = vi.fn(async () => {
+      events.push("close");
+    });
     let launchCount = 0;
     const launch = vi.fn(async () => {
       launchCount++;
@@ -138,8 +304,8 @@ describe("runFirstRunSetup", () => {
       GetVersion: { obsVersion: "31.1.2" },
       SetVideoSettings: {},
       SetProfileParameter: {},
-      GetProfileParameter: (data) =>
-        data?.parameterName === "StreamEncoder" ? { parameterValue: "nvenc" } : { parameterValue: null },
+      GetProfileParameter: profileParams({ encoder: "nvenc" }),
+      GetVideoSettings: videoSettings(),
     });
     const connect = vi.fn(async () => client);
 
@@ -148,7 +314,7 @@ describe("runFirstRunSetup", () => {
         profileIniPath: "C:/appdata/profiles/Whatnot Studio/basic.ini",
         sceneCollectionJsonPath: "C:/appdata/scene_collections/Whatnot Studio.json",
       },
-      fs,
+      fs: trackingFs,
       launch,
       connect,
       closeObs,
@@ -158,8 +324,21 @@ describe("runFirstRunSetup", () => {
 
     expect(result.ok).toBe(true);
     expect(result.versionWarning).toBeUndefined();
+    expect(result.encoderWarning).toMatch(/nvenc/);
     expect(written["C:/appdata/profiles/Whatnot Studio/basic.ini"]).toContain("Name=Whatnot Studio");
     expect(JSON.parse(written["C:/appdata/scene_collections/Whatnot Studio.json"]).name).toBe("Whatnot Studio");
+    expect(JSON.parse(written["C:/appdata/profiles/Whatnot Studio/streamEncoder.json"])).toEqual(
+      buildWhatnotStreamEncoderJson()
+    );
+    expect(streamEncoderJsonPathFromProfileIni("C:/appdata/profiles/Whatnot Studio/basic.ini")).toBe(
+      "C:/appdata/profiles/Whatnot Studio/streamEncoder.json"
+    );
+    const encoderPath = "C:/appdata/profiles/Whatnot Studio/streamEncoder.json";
+    expect(events.filter((e) => e === "close" || e === `write:${encoderPath}`)).toEqual([
+      `write:${encoderPath}`,
+      "close",
+      `write:${encoderPath}`,
+    ]);
     expect(launch).toHaveBeenCalledTimes(2); // initial launch + post-canvas restart
     expect(closeObs).toHaveBeenCalledTimes(1);
     expect(client.calls.some((c) => c.requestType === "SetVideoSettings")).toBe(true);
@@ -185,7 +364,8 @@ describe("runFirstRunSetup", () => {
       GetVersion: { obsVersion: "32.0.1" },
       SetVideoSettings: {},
       SetProfileParameter: {},
-      GetProfileParameter: { parameterValue: "nvenc" },
+      GetProfileParameter: profileParams({ encoder: "nvenc" }),
+      GetVideoSettings: videoSettings(),
     });
     const connect = vi.fn(async () => client);
 
@@ -207,7 +387,7 @@ describe("runFirstRunSetup", () => {
   });
 
   it("writes x264-specific settings when the seller's encoder is already x264", async () => {
-    const { fs } = fakeFs();
+    const { fs, written } = fakeFs();
     const closeObs = vi.fn(async () => {});
     const launch = vi.fn(async () => ({ pid: 6000 }));
 
@@ -217,8 +397,8 @@ describe("runFirstRunSetup", () => {
       GetVersion: { obsVersion: "31.1.2" },
       SetVideoSettings: {},
       SetProfileParameter: {},
-      GetProfileParameter: (data) =>
-        data?.parameterName === "StreamEncoder" ? { parameterValue: "x264" } : { parameterValue: null },
+      GetProfileParameter: profileParams({ encoder: "x264" }),
+      GetVideoSettings: videoSettings(),
     });
     const connect = vi.fn(async () => client);
 
@@ -235,10 +415,18 @@ describe("runFirstRunSetup", () => {
 
     const result = await runFirstRunSetup(deps);
     expect(result.ok).toBe(true);
+    expect(result.encoderWarning).toBeUndefined();
     const x264Call = client.calls.find(
       (c) => c.requestType === "SetProfileParameter" && c.requestData?.parameterName === "x264Settings"
     );
-    expect(x264Call?.requestData?.parameterValue).toMatch(/tune=zerolatency/);
+    expect(x264Call?.requestData?.parameterValue).toBe("keyint=60 tune=zerolatency");
+    expect(x264Call?.requestData?.parameterCategory).toBe("SimpleOutput");
+    expect(JSON.parse(written["C:/appdata/profiles/Whatnot Studio/streamEncoder.json"])).toEqual({
+      bitrate: 3500,
+      keyint_sec: 2,
+      rate_control: "CBR",
+      tune: "zerolatency",
+    });
   });
 
   it("stops on a profile/collection mismatch and never sets the canvas or restarts", async () => {

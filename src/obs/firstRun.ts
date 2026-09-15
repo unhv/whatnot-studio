@@ -124,6 +124,8 @@ export function sceneCollectionFileName(profileName: string = PROFILE_NAME): str
 export interface FirstRunPaths {
   profileIniPath: string;
   sceneCollectionJsonPath: string;
+  /** Sibling of basic.ini. Advanced mode reads this, not AdvOut/VBitrate. */
+  streamEncoderJsonPath?: string;
 }
 
 export interface FirstRunFs {
@@ -142,6 +144,9 @@ export interface FirstRunResult {
    * whatnot-show-tools-measured.md). Not testable live on this machine
    * (31.1.2) -- only the version read + warning text is implemented. */
   versionWarning?: string;
+  /** Set when the streaming encoder is not x264, so keyframe interval and
+   * zerolatency tune cannot be written. Bitrate is still capped. */
+  encoderWarning?: string;
 }
 
 /** Pure — takes obs-websocket's own `obsVersion` string and returns a
@@ -156,6 +161,91 @@ export function checkObsVersionWarning(obsVersion: string): string | undefined {
   return undefined;
 }
 
+/** Matches `SetVideoSettings` / `buildFirstRunProfileIni` in this file. */
+const DEFAULT_CANVAS_FPS = 30;
+const KEYFRAME_INTERVAL_SEC = 2;
+const WHATNOT_VBITRATE = "3500";
+
+export interface EncoderSettingsResult {
+  encoderWarning?: string;
+}
+
+/** x264 `keyint` is measured in frames, not seconds. Whatnot asks for a
+ * 2-second keyframe interval, so keyint = 2 * fps. */
+export function keyintForIntervalSec(
+  fpsNumerator: number,
+  fpsDenominator: number,
+  intervalSec: number = KEYFRAME_INTERVAL_SEC
+): number {
+  const den = fpsDenominator > 0 ? fpsDenominator : 1;
+  const num = fpsNumerator > 0 ? fpsNumerator : DEFAULT_CANVAS_FPS;
+  const frames = Math.round((intervalSec * num) / den);
+  return frames > 0 ? frames : intervalSec * DEFAULT_CANVAS_FPS;
+}
+
+function isX264Encoder(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const v = value.toLowerCase();
+  return v === "x264" || v === "obs_x264" || v === "x264_lowcpu";
+}
+
+/** Advanced output reads this file, not `[AdvOut] VBitrate` / `x264Settings`. */
+export function buildWhatnotStreamEncoderJson(): {
+  bitrate: number;
+  keyint_sec: number;
+  rate_control: string;
+  tune: string;
+} {
+  return {
+    bitrate: Number(WHATNOT_VBITRATE),
+    keyint_sec: KEYFRAME_INTERVAL_SEC,
+    rate_control: "CBR",
+    tune: "zerolatency",
+  };
+}
+
+export function streamEncoderJsonPathFromProfileIni(profileIniPath: string): string {
+  return profileIniPath.replace(/basic\.ini$/i, "streamEncoder.json");
+}
+
+async function readProfileParam(obs: ObsClient, category: string, name: string): Promise<string | null> {
+  const result = await obs.call<{ parameterValue: string | null }>("GetProfileParameter", {
+    parameterCategory: category,
+    parameterName: name,
+  });
+  return result.parameterValue ?? null;
+}
+
+async function setProfileParam(obs: ObsClient, category: string, name: string, value: string): Promise<void> {
+  await obs.call("SetProfileParameter", {
+    parameterCategory: category,
+    parameterName: name,
+    parameterValue: value,
+  });
+}
+
+async function readCategoryEncoder(obs: ObsClient, category: string): Promise<string | null> {
+  // Simple stores the id on StreamEncoder; Advanced stores it on Encoder.
+  const names = category === "AdvOut" ? ["Encoder", "StreamEncoder"] : ["StreamEncoder", "Encoder"];
+  for (const name of names) {
+    const value = await readProfileParam(obs, category, name);
+    if (value) return value;
+  }
+  return null;
+}
+
+async function readCanvasFps(obs: ObsClient): Promise<{ fpsNumerator: number; fpsDenominator: number }> {
+  try {
+    const video = await obs.call<{ fpsNumerator?: number; fpsDenominator?: number }>("GetVideoSettings");
+    const fpsNumerator = video.fpsNumerator && video.fpsNumerator > 0 ? video.fpsNumerator : DEFAULT_CANVAS_FPS;
+    const fpsDenominator = video.fpsDenominator && video.fpsDenominator > 0 ? video.fpsDenominator : 1;
+    return { fpsNumerator, fpsDenominator };
+  } catch {
+    // Canvas is 30 fps in this app. Used when GetVideoSettings is unavailable.
+    return { fpsNumerator: DEFAULT_CANVAS_FPS, fpsDenominator: 1 };
+  }
+}
+
 /**
  * OWNERSHIP RULE EXCEPTION — documented and deliberate (HQ, 2026-09-15,
  * whatnot-show-tools-measured.md). Whatnot's Show Tools page cannot apply
@@ -164,50 +254,70 @@ export function checkObsVersionWarning(obsVersion: string): string | undefined {
  * Rate Control CBR, Tune zerolatency. Since Whatnot's page never writes
  * these itself, writing them here creates no conflict with the file-level
  * ownership rule — `SetStreamServiceSettings` remains untouched forever,
- * and so does everything else in Output/Stream.
+ * and so does everything else in Output/Stream, including `Output/Mode`.
  *
- * MEASURED 2026-09-15 live against a real OBS 31.1.2: `SimpleOutput/VBitrate`
- * is a portable ini parameter, settable via `SetProfileParameter` and
- * confirmed to apply regardless of which streaming encoder is selected
- * (confirmed read-back: 2500 -> 3500). Keyframe Interval / Rate Control /
- * Tune are properties of the x264 encoder specifically (OBS's NVENC/AMF/
- * QuickSync encoders use different property names, e.g. NVENC has no
- * "tune" concept at all) — they can only be safely written when the
- * seller's own `SimpleOutput/StreamEncoder` is already x264, via the
- * `x264Settings` custom-options ini field (confirmed writable, format
- * `key=value key=value ...`). On this session's test machine the default
- * `StreamEncoder` was `nvenc`, not `x264` — the x264 path below was
- * exercised for the write only (confirmed the field accepts and persists
- * the string), not end-to-end against a real x264 stream, and is not
- * forced onto sellers using a different encoder. See HANDOVER.md.
+ * Where the four values actually live, and why we do not write AdvOut/*:
+ * - Read `Output/Mode` first. Never change it. Whatnot's "update profile"
+ *   button sets Advanced; flipping Mode here would be a fifth owned setting.
+ * - Simple mode is governed by `[SimpleOutput]`. We write `VBitrate` there
+ *   always, and `UseAdvanced` + `x264Settings=keyint=<2*fps> tune=zerolatency`
+ *   only when *that category's* `StreamEncoder` is already x264.
+ * - Advanced mode is governed by `streamEncoder.json` (`bitrate`,
+ *   `keyint_sec`, `rate_control`, `tune`) plus `[AdvOut] Encoder`.
+ *   `SetProfileParameter` cannot populate that JSON. `AdvOut/VBitrate` and
+ *   `AdvOut/x264Settings` are not keys OBS reads for the stream encode —
+ *   the live "Whatnot Studio Test" profile has neither, and its
+ *   `streamEncoder.json` is `{}`. Writing them is the same stored≠governs
+ *   trap as the original SimpleOutput read-back. The JSON is written by
+ *   `runFirstRunSetup` after OBS exits so the relaunch (and Whatnot's later
+ *   Mode=Advanced) actually loads it.
+ * - SimpleOutput and AdvOut keep independent encoder ids. This machine's
+ *   Untitled profile is Simple=nvenc / AdvOut=obs_nvenc_h264_tex; the
+ *   throwaway test profile is Simple=nvenc / AdvOut=obs_x264. Mirroring
+ *   x264Settings from the governing encoder onto the other category is
+ *   how keyint/tune silently stop applying after Whatnot flips Mode.
+ *
+ * `keyint` in Simple `x264Settings` is 2 * fps (frames). Advanced JSON
+ * uses `keyint_sec` (seconds) — the encoder UI's unit, fps-independent.
+ *
+ * NVENC/AMF/QuickSync are not an edge case — this machine's default
+ * Simple encoder was nvenc. Those encoders have no `x264Settings`/`tune`
+ * field. Bitrate (and, in the encoder JSON, `keyint_sec` + CBR) still
+ * apply; tune does not. A warning is returned rather than staying silent.
+ * We do not force x264 onto the seller.
  */
-export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<void> {
-  await obs.call("SetProfileParameter", {
-    parameterCategory: "SimpleOutput",
-    parameterName: "VBitrate",
-    parameterValue: "3500",
-  });
+export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<EncoderSettingsResult> {
+  const mode = await readProfileParam(obs, "Output", "Mode");
+  const { fpsNumerator, fpsDenominator } = await readCanvasFps(obs);
+  const keyint = keyintForIntervalSec(fpsNumerator, fpsDenominator);
 
-  const streamEncoder = await obs.call<{ parameterValue: string | null }>("GetProfileParameter", {
-    parameterCategory: "SimpleOutput",
-    parameterName: "StreamEncoder",
-  });
+  const simpleEncoder = await readCategoryEncoder(obs, "SimpleOutput");
+  const advEncoder = await readCategoryEncoder(obs, "AdvOut");
 
-  if (streamEncoder.parameterValue === "x264" || streamEncoder.parameterValue === "obs_x264") {
-    await obs.call("SetProfileParameter", {
-      parameterCategory: "SimpleOutput",
-      parameterName: "UseAdvanced",
-      parameterValue: "true",
-    });
-    await obs.call("SetProfileParameter", {
-      parameterCategory: "SimpleOutput",
-      parameterName: "x264Settings",
-      parameterValue: "keyint=2 tune=zerolatency",
-    });
+  await setProfileParam(obs, "SimpleOutput", "VBitrate", WHATNOT_VBITRATE);
+
+  if (isX264Encoder(simpleEncoder)) {
+    await setProfileParam(obs, "SimpleOutput", "UseAdvanced", "true");
+    await setProfileParam(obs, "SimpleOutput", "x264Settings", `keyint=${keyint} tune=zerolatency`);
   }
-  // Rate Control CBR: OBS's Simple output mode always streams at the fixed
-  // VBitrate set above (no variable-bitrate option exists in Simple mode),
-  // which is CBR in effect — no separate write is needed or attempted.
+
+  const governingEncoder = mode === "Advanced" ? advEncoder : simpleEncoder;
+  const governingIsX264 = isX264Encoder(governingEncoder);
+  const advIsX264 = isX264Encoder(advEncoder);
+  if (governingIsX264 && advIsX264) {
+    return {};
+  }
+
+  const named = !advIsX264 ? (advEncoder ?? "unset") : (governingEncoder ?? "unset");
+  return {
+    encoderWarning:
+      `Streaming encoder is "${named}", not x264. ` +
+      `Whatnot requires a ${KEYFRAME_INTERVAL_SEC}-second keyframe interval and Tune=zerolatency; ` +
+      `those are x264 settings and were not written to the encoder that will govern after ` +
+      `Whatnot sets Output Mode to Advanced. ` +
+      `Bitrate is still capped at ${WHATNOT_VBITRATE} Kbps on SimpleOutput and in streamEncoder.json. ` +
+      `Set OBS Output → Streaming Encoder to x264 to apply the remaining required values.`,
+  };
 }
 
 export interface FirstRunDeps {
@@ -239,6 +349,12 @@ export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResu
     JSON.stringify(buildSceneCollectionSkeleton(profileName), null, 2)
   );
 
+  const encoderJsonPath =
+    deps.paths.streamEncoderJsonPath ?? streamEncoderJsonPathFromProfileIni(deps.paths.profileIniPath);
+  const encoderJson = JSON.stringify(buildWhatnotStreamEncoderJson());
+  await deps.fs.mkdir(deps.fs.dirname(encoderJsonPath));
+  await deps.fs.writeFile(encoderJsonPath, encoderJson);
+
   const { pid } = await deps.launch();
   const obs = await deps.connect();
 
@@ -262,15 +378,19 @@ export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResu
     fpsNumerator: 30,
     fpsDenominator: 1,
   });
-  await applyWhatnotEncoderSettings(obs);
+  const { encoderWarning } = await applyWhatnotEncoderSettings(obs);
   await obs.disconnect();
 
   // The canvas setting only takes effect for Whatnot's health check after a
   // full restart (FINDINGS.md check 3) — this is a one-time cost.
   await deps.closeObs(pid);
+  // OBS may dump in-memory encoder settings over streamEncoder.json on
+  // exit. Rewrite after close so the relaunch (and Whatnot's later
+  // Mode=Advanced) loads bitrate/keyint_sec/CBR/tune rather than `{}`.
+  await deps.fs.writeFile(encoderJsonPath, encoderJson);
   const relaunched = await deps.launch();
   const obs2 = await deps.connect();
   await obs2.disconnect();
 
-  return { ok: true, pid: relaunched.pid, versionWarning };
+  return { ok: true, pid: relaunched.pid, versionWarning, encoderWarning };
 }

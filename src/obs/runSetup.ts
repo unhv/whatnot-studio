@@ -7,7 +7,13 @@
  * Electron) -- previously this wiring did not exist at all; the Setup
  * screen's Continue button only flipped `screen` in the store.
  */
-import { runFirstRunSetup, type FirstRunDeps, type FirstRunFs, type FirstRunResult } from "./firstRun.js";
+import {
+  runFirstRunSetup,
+  streamEncoderJsonPathFromProfileIni,
+  type FirstRunDeps,
+  type FirstRunFs,
+  type FirstRunResult,
+} from "./firstRun.js";
 import type { ObsClient } from "./client.js";
 import { PROFILE_NAME } from "../shared/types.js";
 
@@ -15,12 +21,18 @@ import { PROFILE_NAME } from "../shared/types.js";
  * narrow and structural (not importing the preload's concrete type) so a
  * test can pass a plain fake object without touching Electron at all. */
 export interface FirstRunBridge {
-  firstRunPaths(profileName?: string): Promise<{ profileIniPath: string; sceneCollectionJsonPath: string }>;
-  writeFirstRunFiles(args: {
+  firstRunPaths(profileName?: string): Promise<{
     profileIniPath: string;
     sceneCollectionJsonPath: string;
-    profileIni: string;
-    sceneCollectionJson: string;
+    streamEncoderJsonPath?: string;
+  }>;
+  writeFirstRunFiles(args: {
+    profileIniPath?: string;
+    sceneCollectionJsonPath?: string;
+    profileIni?: string;
+    sceneCollectionJson?: string;
+    streamEncoderJsonPath?: string;
+    streamEncoderJson?: string;
   }): Promise<void>;
   launchObs(opts: { port: number; password: string; profileName?: string }): Promise<{ pid: number }>;
   closeObs(pid: number): Promise<void>;
@@ -28,14 +40,18 @@ export interface FirstRunBridge {
 
 function makeBatchedFs(
   bridge: FirstRunBridge,
-  paths: { profileIniPath: string; sceneCollectionJsonPath: string }
+  paths: { profileIniPath: string; sceneCollectionJsonPath: string; streamEncoderJsonPath?: string }
 ): FirstRunFs {
-  // electron/main.ts's firstRun:writeFiles IPC handler writes both files (and
-  // their mkdir -p) in a single call, but runFirstRunSetup calls
-  // mkdir/writeFile once per file in sequence -- buffer both and fire once
-  // both contents are known.
+  // electron/main.ts's firstRun:writeFiles IPC handler writes the files (and
+  // their mkdir -p) in one call, but runFirstRunSetup calls mkdir/writeFile
+  // once per file in sequence -- buffer the profile + collection and fire
+  // once both are known. streamEncoder.json can arrive later (after OBS
+  // exits) and is written on its own so a late rewrite is not dropped.
   let profileIni: string | null = null;
   let sceneCollectionJson: string | null = null;
+  let flushedMain = false;
+  const streamEncoderJsonPath =
+    paths.streamEncoderJsonPath ?? streamEncoderJsonPathFromProfileIni(paths.profileIniPath);
 
   return {
     async mkdir() {
@@ -45,8 +61,16 @@ function makeBatchedFs(
     async writeFile(filePath: string, contents: string) {
       if (filePath === paths.profileIniPath) profileIni = contents;
       else if (filePath === paths.sceneCollectionJsonPath) sceneCollectionJson = contents;
+      else if (filePath === streamEncoderJsonPath) {
+        await bridge.writeFirstRunFiles({
+          streamEncoderJsonPath,
+          streamEncoderJson: contents,
+        });
+        return;
+      }
 
-      if (profileIni !== null && sceneCollectionJson !== null) {
+      if (!flushedMain && profileIni !== null && sceneCollectionJson !== null) {
+        flushedMain = true;
         await bridge.writeFirstRunFiles({
           profileIniPath: paths.profileIniPath,
           sceneCollectionJsonPath: paths.sceneCollectionJsonPath,

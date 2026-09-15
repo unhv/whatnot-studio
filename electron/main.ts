@@ -30,8 +30,10 @@ const OBS_APPDATA = path.join(os.homedir(), "AppData", "Roaming", "obs-studio");
 function firstRunPaths(profileName: string = PROFILE_NAME) {
   const dir = profileDirName(profileName);
   const file = sceneCollectionFileName(profileName);
+  const profileDir = path.join(OBS_APPDATA, "basic", "profiles", dir);
   return {
-    profileIniPath: path.join(OBS_APPDATA, "basic", "profiles", dir, "basic.ini"),
+    profileIniPath: path.join(profileDir, "basic.ini"),
+    streamEncoderJsonPath: path.join(profileDir, "streamEncoder.json"),
     sceneCollectionJsonPath: path.join(OBS_APPDATA, "basic", "scenes", `${file}.json`),
   };
 }
@@ -121,11 +123,29 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "firstRun:writeFiles",
-    async (_event, args: { profileIniPath: string; sceneCollectionJsonPath: string; profileIni: string; sceneCollectionJson: string }) => {
-      await fs.mkdir(path.dirname(args.profileIniPath), { recursive: true });
-      await fs.writeFile(args.profileIniPath, args.profileIni, "utf8");
-      await fs.mkdir(path.dirname(args.sceneCollectionJsonPath), { recursive: true });
-      await fs.writeFile(args.sceneCollectionJsonPath, args.sceneCollectionJson, "utf8");
+    async (
+      _event,
+      args: {
+        profileIniPath?: string;
+        sceneCollectionJsonPath?: string;
+        profileIni?: string;
+        sceneCollectionJson?: string;
+        streamEncoderJsonPath?: string;
+        streamEncoderJson?: string;
+      }
+    ) => {
+      if (args.profileIniPath && args.profileIni != null) {
+        await fs.mkdir(path.dirname(args.profileIniPath), { recursive: true });
+        await fs.writeFile(args.profileIniPath, args.profileIni, "utf8");
+      }
+      if (args.sceneCollectionJsonPath && args.sceneCollectionJson != null) {
+        await fs.mkdir(path.dirname(args.sceneCollectionJsonPath), { recursive: true });
+        await fs.writeFile(args.sceneCollectionJsonPath, args.sceneCollectionJson, "utf8");
+      }
+      if (args.streamEncoderJsonPath && args.streamEncoderJson != null) {
+        await fs.mkdir(path.dirname(args.streamEncoderJsonPath), { recursive: true });
+        await fs.writeFile(args.streamEncoderJsonPath, args.streamEncoderJson, "utf8");
+      }
     }
   );
 

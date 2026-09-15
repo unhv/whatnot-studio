@@ -7,6 +7,7 @@ function makeBridge(overrides: Partial<FirstRunBridge> = {}): FirstRunBridge {
     firstRunPaths: vi.fn(async () => ({
       profileIniPath: "C:/appdata/profiles/Whatnot Studio/basic.ini",
       sceneCollectionJsonPath: "C:/appdata/scenes/Whatnot Studio.json",
+      streamEncoderJsonPath: "C:/appdata/profiles/Whatnot Studio/streamEncoder.json",
     })),
     writeFirstRunFiles: vi.fn(async () => {}),
     launchObs: vi.fn(async () => ({ pid: 1234 })),
@@ -36,11 +37,18 @@ describe("runAppFirstRun", () => {
 
     expect(result.ok).toBe(true);
     expect(bridge.firstRunPaths).toHaveBeenCalledWith("Whatnot Studio");
-    // both files are buffered and sent in one batched IPC call
-    expect(bridge.writeFirstRunFiles).toHaveBeenCalledTimes(1);
-    const writeArgs = (bridge.writeFirstRunFiles as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(writeArgs.profileIni).toContain("Name=Whatnot Studio");
-    expect(JSON.parse(writeArgs.sceneCollectionJson).name).toBe("Whatnot Studio");
+    const writeCalls = (bridge.writeFirstRunFiles as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    const mainWrite = writeCalls.find((a) => a.profileIni);
+    expect(mainWrite?.profileIni).toContain("Name=Whatnot Studio");
+    expect(JSON.parse(mainWrite?.sceneCollectionJson ?? "{}").name).toBe("Whatnot Studio");
+    const encoderWrites = writeCalls.filter((a) => a.streamEncoderJson);
+    expect(encoderWrites.length).toBe(2);
+    expect(JSON.parse(encoderWrites[0].streamEncoderJson)).toEqual({
+      bitrate: 3500,
+      keyint_sec: 2,
+      rate_control: "CBR",
+      tune: "zerolatency",
+    });
     expect(bridge.launchObs).toHaveBeenCalledTimes(2); // initial + post-canvas restart
     expect(bridge.closeObs).toHaveBeenCalledTimes(1);
     expect(client.connectCalls).toBeGreaterThanOrEqual(1);
