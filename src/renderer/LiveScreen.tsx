@@ -4,6 +4,7 @@ import { elapsedMs, liveScreenCopy } from "../obs/liveMode.js";
 import { RealObsClient } from "../obs/client.js";
 import { formatElapsed, formatPrice } from "../shared/format.js";
 import { deriveLowerThirdText } from "../state/itemBar.js";
+import { TextStyleObsSync } from "../state/textStyle.js";
 import { SCENE_KEYS, type SceneKey } from "../shared/types.js";
 import {
   canReturnToSetup,
@@ -11,6 +12,7 @@ import {
   startLiveScreenSession,
 } from "./liveScreenSession.js";
 import AudioPanel from "./AudioPanel.js";
+import TextPlacementControl, { useTextStyleSession } from "./TextPlacementControl.js";
 
 const SCENE_HOTKEYS: Record<SceneKey, string> = { ME: "F1", TABLE: "F2", BOTH: "F3", BREAK: "F4" };
 
@@ -24,6 +26,12 @@ export default function LiveScreen() {
   const dispatchItemBar = useAppStore((s) => s.dispatchItemBar);
   const obsPort = useAppStore((s) => s.showConfig.obsPort);
   const obsPassword = useAppStore((s) => s.showConfig.obsPassword);
+  const showName = useAppStore((s) => s.showConfig.showName);
+  const showConfig = useAppStore((s) => s.showConfig);
+  const { state: textStyle, dispatch: dispatchText, syncRef: textSyncRef, stateRef: textStyleRef } =
+    useTextStyleSession(showName);
+  const dispatchTextRef = useRef(dispatchText);
+  dispatchTextRef.current = dispatchText;
 
   const [now, setNow] = useState(() => Date.now());
   const retryNowRef = useRef<() => void>(() => {});
@@ -37,10 +45,17 @@ export default function LiveScreen() {
       getClient: () => client,
       isConnected: () => useAppStore.getState().connectionStatus === "connected",
     });
+    const textSync = new TextStyleObsSync({
+      getClient: () => client,
+      isConnected: () => useAppStore.getState().connectionStatus === "connected",
+      reportMissing: (ids) => dispatchTextRef.current({ type: "MISSING", ids }),
+    });
+    textSyncRef.current = textSync;
     setItemBarObsSync(sync);
     const unsub = useAppStore.subscribe((state, prev) => {
       if (prev.connectionStatus !== "connected" && state.connectionStatus === "connected") {
         sync.resync(state.itemBar);
+        textSync.resync(textStyleRef.current);
       }
     });
     const session = startLiveScreenSession({
@@ -52,11 +67,13 @@ export default function LiveScreen() {
     return () => {
       retryNowRef.current = () => {};
       unsub();
+      textSyncRef.current = null;
       setItemBarObsSync(null);
       sync.dispose();
+      textSync.dispose();
       session.stop();
     };
-  }, [obsPort, obsPassword]);
+  }, [obsPort, obsPassword, textSyncRef, textStyleRef]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -130,11 +147,16 @@ export default function LiveScreen() {
         </div>
       </div>
 
-      {/* Preview, ~270px wide portrait, not clickable. Populated by polling
-          GetSourceScreenshot at 2-4fps once connected — see HANDOVER.md. */}
-      <div className="mx-auto flex h-[480px] w-[270px] items-center justify-center rounded-md bg-black ring-1 ring-neutral-800">
-        <span className="text-xs text-neutral-600">Preview</span>
-      </div>
+      {/* 270×480 portrait — the seller drags text here. OBS screenshot
+          polling is a later brief; this surface is ours, never OBS. */}
+      <TextPlacementControl
+        state={textStyle}
+        dispatch={dispatchText}
+        itemPreview={lowerThird ?? undefined}
+        onRestore={() => {
+          void textSyncRef.current?.restoreScenes(showConfig);
+        }}
+      />
 
       {/* Scene grid: straight cut between ME/TABLE/BOTH, 300ms fade into/out
           of BREAK — the fade duration itself is applied over the websocket,

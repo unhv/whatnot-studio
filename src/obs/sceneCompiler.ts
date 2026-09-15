@@ -134,8 +134,9 @@ export function tileFillTransform(tileW: number, tileH: number, offsetX: number,
   return { ...t, positionX: offsetX, positionY: offsetY };
 }
 
-const BREAK_CARD_SOURCE = "BREAK Card";
+export const BREAK_CARD_SOURCE = "BREAK Card";
 const BREAK_CARD_KIND = "text_gdiplus_v3";
+export const BREAK_CARD_TEXT = "BE RIGHT BACK";
 
 /** Same input name in every camera-facing scene so one SetInputSettings updates all of them. */
 export const ITEM_BAR_SOURCE = "Item Bar";
@@ -144,71 +145,269 @@ export const TEXT_SOURCE_KIND = "text_gdiplus_v3";
 export const CAMERA_FACING_SCENES = ["ME", "TABLE", "BOTH"] as const;
 export const SOLD_BANNER_TEXT = "SOLD!";
 
+export const TEXT_OVERLAY_IDS = ["itemBar", "soldBanner", "breakCard"] as const;
+export type TextOverlayId = (typeof TEXT_OVERLAY_IDS)[number];
+export const TEXT_SIZE_NAMES = ["small", "normal", "huge"] as const;
+export type TextSizeName = (typeof TEXT_SIZE_NAMES)[number];
+export const TEXT_SNAP_NAMES = ["top", "middle", "bottom", "safe"] as const;
+export type TextSnapName = (typeof TEXT_SNAP_NAMES)[number];
+
 /**
- * text_gdiplus_v3 treatment for the item/price lower third.
- * 72px Arial Black, white fill, 8px black outline, 70% black backing,
- * 1000×320 extents — sits in the bottom ~400px of the 1080×1920 canvas
- * so it stays readable on a phone over a busy card mat.
- * Colors are Windows COLORREF (0x00BBGGRR); white/black are palindromes.
+ * Whatnot's own chrome on a 1080×1920 phone stream: header along the top,
+ * bid/buy bar along the bottom. "safe" snap keeps the box clear of both.
  */
-export const ITEM_BAR_TEXT_SETTINGS: Record<string, unknown> = {
+export const WHATNOT_SAFE_TOP = 220;
+export const WHATNOT_SAFE_BOTTOM = 380;
+/** Pad off the physical bottom edge for the "bottom" (lower-third) snap. */
+export const BOTTOM_EDGE_PAD = 80;
+export const SNAP_THRESHOLD_PX = 80;
+export const PREVIEW_WIDTH = 270;
+export const PREVIEW_HEIGHT = 480;
+
+const SIZE_SCALE: Record<TextSizeName, number> = { small: 0.67, normal: 1, huge: 1.5 };
+
+const OVERLAY_BASE = {
+  itemBar: { font: 72, outline: 8, width: 1000, height: 320, backing: 70 },
+  soldBanner: { font: 160, outline: 16, width: 1000, height: 400, backing: 80 },
+  breakCard: { font: 120, outline: 12, width: 1000, height: 400, backing: 70 },
+} as const;
+
+export function overlaySourceName(id: TextOverlayId): string {
+  switch (id) {
+    case "itemBar":
+      return ITEM_BAR_SOURCE;
+    case "soldBanner":
+      return SOLD_BANNER_SOURCE;
+    case "breakCard":
+      return BREAK_CARD_SOURCE;
+  }
+}
+
+export function overlaySceneNames(id: TextOverlayId): readonly string[] {
+  return id === "breakCard" ? ["BREAK"] : CAMERA_FACING_SCENES;
+}
+
+export function overlayFontSize(id: TextOverlayId, size: TextSizeName): number {
+  return Math.round(OVERLAY_BASE[id].font * SIZE_SCALE[size]);
+}
+
+export function overlayBox(id: TextOverlayId, size: TextSizeName): { width: number; height: number } {
+  const s = SIZE_SCALE[size];
+  return {
+    width: Math.min(CANVAS_WIDTH, Math.round(OVERLAY_BASE[id].width * s)),
+    height: Math.round(OVERLAY_BASE[id].height * s),
+  };
+}
+
+export function overlayOutlineSize(id: TextOverlayId, size: TextSizeName): number {
+  return Math.max(4, Math.round(OVERLAY_BASE[id].outline * SIZE_SCALE[size]));
+}
+
+function identityLikeTransform(positionX: number, positionY: number): Transform {
+  return {
+    positionX,
+    positionY,
+    scaleX: 1,
+    scaleY: 1,
+    cropLeft: 0,
+    cropRight: 0,
+    cropTop: 0,
+    cropBottom: 0,
+  };
+}
+
+export function snapPositionY(snap: TextSnapName, boxHeight: number): number {
+  switch (snap) {
+    case "top":
+      return WHATNOT_SAFE_TOP;
+    case "middle":
+      return Math.round((CANVAS_HEIGHT - boxHeight) / 2);
+    case "bottom":
+      return CANVAS_HEIGHT - boxHeight - BOTTOM_EDGE_PAD;
+    case "safe":
+      return CANVAS_HEIGHT - WHATNOT_SAFE_BOTTOM - boxHeight;
+  }
+}
+
+export function overlaySnapTransform(id: TextOverlayId, snap: TextSnapName, size: TextSizeName): Transform {
+  const box = overlayBox(id, size);
+  const x = Math.round((CANVAS_WIDTH - box.width) / 2);
+  return identityLikeTransform(x, snapPositionY(snap, box.height));
+}
+
+export function overlayTransformAt(positionX: number, positionY: number): Transform {
+  return identityLikeTransform(positionX, positionY);
+}
+
+export function clampOverlayPosition(
+  id: TextOverlayId,
+  size: TextSizeName,
+  x: number,
+  y: number
+): { x: number; y: number } {
+  const box = overlayBox(id, size);
+  return {
+    x: Math.round(Math.min(Math.max(x, 0), CANVAS_WIDTH - box.width)),
+    y: Math.round(Math.min(Math.max(y, 0), CANVAS_HEIGHT - box.height)),
+  };
+}
+
+export function nearestSnap(
+  id: TextOverlayId,
+  size: TextSizeName,
+  x: number,
+  y: number
+): { snap: TextSnapName | "custom"; positionX: number; positionY: number } {
+  let best: TextSnapName = "middle";
+  let bestDist = Infinity;
+  let bestT = overlaySnapTransform(id, "middle", size);
+  for (const snap of TEXT_SNAP_NAMES) {
+    const t = overlaySnapTransform(id, snap, size);
+    const d = Math.hypot(t.positionX - x, t.positionY - y);
+    if (d < bestDist) {
+      bestDist = d;
+      best = snap;
+      bestT = t;
+    }
+  }
+  if (bestDist <= SNAP_THRESHOLD_PX) {
+    return { snap: best, positionX: bestT.positionX, positionY: bestT.positionY };
+  }
+  return { snap: "custom", positionX: x, positionY: y };
+}
+
+/**
+ * text_gdiplus_v3 fill/outline/backing. Colors are Windows COLORREF (0x00BBGGRR).
+ * Outline + backing stay black so a busy card mat cannot swallow the fill.
+ */
+export function overlayInputSettings(
+  id: TextOverlayId,
+  opts: { colorref: number; size: TextSizeName; text?: string }
+): Record<string, unknown> {
+  const box = overlayBox(id, opts.size);
+  const settings: Record<string, unknown> = {
+    font: { face: "Arial Black", size: overlayFontSize(id, opts.size), flags: 1, style: "Bold" },
+    color: opts.colorref,
+    outline: true,
+    outline_size: overlayOutlineSize(id, opts.size),
+    outline_color: 0x000000,
+    bk_color: 0x000000,
+    bk_opacity: OVERLAY_BASE[id].backing,
+    align: "center",
+    valign: "center",
+    extents: true,
+    extents_cx: box.width,
+    extents_cy: box.height,
+  };
+  if (opts.text !== undefined) settings.text = opts.text;
+  return settings;
+}
+
+/** Style-only patch for SetInputSettings — never includes `text`, so a colour
+ * drag cannot clobber the item name the seller just typed. */
+export function overlayStyleSettings(
+  id: TextOverlayId,
+  opts: { colorref: number; size: TextSizeName }
+): Record<string, unknown> {
+  const settings = overlayInputSettings(id, opts);
+  delete settings.text;
+  return settings;
+}
+
+export const ITEM_BAR_TEXT_SETTINGS: Record<string, unknown> = overlayInputSettings("itemBar", {
+  colorref: 0xffffff,
+  size: "normal",
   text: "",
-  font: { face: "Arial Black", size: 72, flags: 1, style: "Bold" },
-  color: 0xffffff,
-  outline: true,
-  outline_size: 8,
-  outline_color: 0x000000,
-  bk_color: 0x000000,
-  bk_opacity: 70,
-  align: "center",
-  valign: "center",
-  extents: true,
-  extents_cx: 1000,
-  extents_cy: 320,
-};
+});
 
-/**
- * Separate, louder SOLD source — 160px gold (#FFC828 as COLORREF 0x0028C8FF),
- * 16px black outline, 80% backing, mid-canvas so it cannot be missed.
- * Static text; runtime only toggles the scene item.
- */
-export const SOLD_BANNER_TEXT_SETTINGS: Record<string, unknown> = {
+export const SOLD_BANNER_TEXT_SETTINGS: Record<string, unknown> = overlayInputSettings("soldBanner", {
+  colorref: 0x0028c8ff,
+  size: "normal",
   text: SOLD_BANNER_TEXT,
-  font: { face: "Arial Black", size: 160, flags: 1, style: "Bold" },
-  color: 0x0028c8ff,
-  outline: true,
-  outline_size: 16,
-  outline_color: 0x000000,
-  bk_color: 0x000000,
-  bk_opacity: 80,
-  align: "center",
-  valign: "center",
-  extents: true,
-  extents_cx: 1000,
-  extents_cy: 400,
-};
+});
 
-export const ITEM_BAR_TRANSFORM: Transform = {
-  positionX: 40,
-  positionY: 1520,
-  scaleX: 1,
-  scaleY: 1,
-  cropLeft: 0,
-  cropRight: 0,
-  cropTop: 0,
-  cropBottom: 0,
-};
+export const BREAK_CARD_TEXT_SETTINGS: Record<string, unknown> = overlayInputSettings("breakCard", {
+  colorref: 0xffffff,
+  size: "normal",
+  text: BREAK_CARD_TEXT,
+});
 
-export const SOLD_BANNER_TRANSFORM: Transform = {
-  positionX: 40,
-  positionY: 720,
-  scaleX: 1,
-  scaleY: 1,
-  cropLeft: 0,
-  cropRight: 0,
-  cropTop: 0,
-  cropBottom: 0,
-};
+export const ITEM_BAR_TRANSFORM: Transform = overlaySnapTransform("itemBar", "safe", "normal");
+export const SOLD_BANNER_TRANSFORM: Transform = overlaySnapTransform("soldBanner", "middle", "normal");
+export const BREAK_CARD_TRANSFORM: Transform = overlaySnapTransform("breakCard", "middle", "normal");
+
+/** Preset fills. Gold matches the SOLD default. Ice/hot read on a card mat. */
+export const TEXT_COLOR_PRESETS: { id: string; label: string; colorref: number }[] = [
+  { id: "white", label: "White", colorref: 0xffffff },
+  { id: "gold", label: "Gold", colorref: 0x0028c8ff },
+  { id: "red", label: "Red", colorref: 0x000000ff },
+  { id: "ice", label: "Ice", colorref: 0x00ffe7c2 },
+  { id: "hot", label: "Hot", colorref: 0x004a22ff },
+];
+
+export function cssHexToColorref(hex: string): number {
+  const raw = hex.replace("#", "").trim();
+  const h =
+    raw.length === 3
+      ? raw
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : raw;
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return 0xffffff;
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff);
+}
+
+export function colorrefToCssHex(colorref: number): string {
+  const r = colorref & 0xff;
+  const g = (colorref >> 8) & 0xff;
+  const b = (colorref >> 16) & 0xff;
+  return `#${[r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function channelLuminance(channel: number): number {
+  const s = channel / 255;
+  return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+}
+
+export function relativeLuminance(colorref: number): number {
+  const r = colorref & 0xff;
+  const g = (colorref >> 8) & 0xff;
+  const b = (colorref >> 16) & 0xff;
+  return 0.2126 * channelLuminance(r) + 0.7152 * channelLuminance(g) + 0.0722 * channelLuminance(b);
+}
+
+export function contrastRatio(a: number, b: number): number {
+  const L1 = relativeLuminance(a);
+  const L2 = relativeLuminance(b);
+  const hi = Math.max(L1, L2);
+  const lo = Math.min(L1, L2);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** Black outline + backing keep the fill readable; warn when the fill itself
+ * is too close to that black to survive a busy card mat. */
+export const UNREADABLE_CONTRAST = 3;
+
+export function fillUnreadableOnMat(colorref: number): boolean {
+  return contrastRatio(colorref, 0x000000) < UNREADABLE_CONTRAST;
+}
+
+export function canvasPointFromPreview(
+  clientX: number,
+  clientY: number,
+  rect: { left: number; top: number; width: number; height: number }
+): { x: number; y: number } {
+  const w = rect.width || 1;
+  const h = rect.height || 1;
+  return {
+    x: ((clientX - rect.left) / w) * CANVAS_WIDTH,
+    y: ((clientY - rect.top) / h) * CANVAS_HEIGHT,
+  };
+}
 
 function identityTransform(): Transform {
   return {
@@ -243,8 +442,14 @@ function cameraFacingOverlays(): DesiredSceneItem[] {
   ];
 }
 
-/** Build the desired four-scene model from a ShowConfig. Pure — no OBS. */
-export function buildDesiredScenes(config: ShowConfig): DesiredScene[] {
+/** Build the desired four-scene model from a ShowConfig. Pure — no OBS.
+ * `overlayVisible.breakCard` is the seller's show/hide; omit it and BREAK
+ * still comes up with BE RIGHT BACK on. Item bar / SOLD stay compiled
+ * disabled — those flags belong to the SHOW/CLEAR/SOLD path. */
+export function buildDesiredScenes(
+  config: ShowConfig,
+  overlayVisible?: Partial<Record<TextOverlayId, boolean>>
+): DesiredScene[] {
   const cameraName = config.camera?.label ?? "Camera";
   const tableName = config.captureCard?.label ?? cameraName;
 
@@ -318,9 +523,9 @@ export function buildDesiredScenes(config: ShowConfig): DesiredScene[] {
       {
         sourceName: BREAK_CARD_SOURCE,
         sourceKind: BREAK_CARD_KIND,
-        inputSettings: { text: "BE RIGHT BACK" },
-        transform: identityTransform(),
-        enabled: true,
+        inputSettings: BREAK_CARD_TEXT_SETTINGS,
+        transform: BREAK_CARD_TRANSFORM,
+        enabled: overlayVisible?.breakCard ?? true,
       },
     ],
   };

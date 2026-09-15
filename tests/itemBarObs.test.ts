@@ -10,7 +10,9 @@ import {
 import {
   ITEM_BAR_OBS_DEBOUNCE_MS,
   ItemBarObsSync,
+  resetItemBarOverlayFlags,
   setItemBarObsSync,
+  setItemBarOverlayFlags,
   useAppStore,
   type ItemBarObsClock,
 } from "../src/state/store.js";
@@ -83,6 +85,7 @@ function drive(sync: ItemBarObsSync, actions: ItemBarAction[]): ItemBarState {
 describe("ItemBarObsSync", () => {
   beforeEach(() => {
     setItemBarObsSync(null);
+    resetItemBarOverlayFlags();
     useAppStore.setState({ itemBar: initialItemBarState(), connectionStatus: "disconnected" });
   });
 
@@ -227,6 +230,7 @@ describe("ItemBarObsSync", () => {
         },
       },
       ...enableCalls(ITEM_BAR_SOURCE, true),
+      ...enableCalls(SOLD_BANNER_SOURCE, false),
     ]);
   });
 
@@ -285,5 +289,61 @@ describe("ItemBarObsSync", () => {
         (c) => c.requestType === "SetSceneItemEnabled" && c.requestData?.sceneItemId === 9
       )
     ).toBe(true);
+  });
+
+  it("hiding the SOLD banner keeps it hidden across a SOLD press", async () => {
+    const client = new FakeObsClient({
+      GetSceneItemId: (data?: Record<string, unknown>) => ({
+        sceneItemId: data?.sourceName === SOLD_BANNER_SOURCE ? 2 : 1,
+      }),
+      SetInputSettings: {},
+      SetSceneItemEnabled: {},
+    });
+    const sync = new ItemBarObsSync({ getClient: () => client });
+    setItemBarOverlayFlags({ itemBar: true, soldBanner: false });
+
+    drive(sync, [
+      { type: "SET_ITEM", item: "Mug", price: "$12" },
+      { type: "SHOW" },
+      { type: "SOLD", now: 1000 },
+    ]);
+    await sync.idle();
+
+    expect(
+      client.calls.filter(
+        (c) =>
+          c.requestType === "SetSceneItemEnabled" &&
+          c.requestData?.sceneItemId === 2 &&
+          c.requestData?.sceneItemEnabled === true
+      )
+    ).toEqual([]);
+  });
+
+  it("hiding the item bar keeps it hidden across a SHOW press", async () => {
+    const client = new FakeObsClient({
+      GetSceneItemId: (data?: Record<string, unknown>) => ({
+        sceneItemId: data?.sourceName === ITEM_BAR_SOURCE ? 1 : 2,
+      }),
+      SetInputSettings: {},
+      SetSceneItemEnabled: {},
+    });
+    const sync = new ItemBarObsSync({ getClient: () => client });
+    setItemBarOverlayFlags({ itemBar: false, soldBanner: true });
+
+    drive(sync, [
+      { type: "SET_ITEM", item: "Mug", price: "$12" },
+      { type: "SHOW" },
+    ]);
+    await sync.idle();
+
+    expect(
+      client.calls.filter(
+        (c) =>
+          c.requestType === "SetSceneItemEnabled" &&
+          c.requestData?.sceneItemId === 1 &&
+          c.requestData?.sceneItemEnabled === true
+      )
+    ).toEqual([]);
+    expect(client.calls.filter((c) => c.requestType === "SetSceneItemEnabled")).toEqual([]);
   });
 });

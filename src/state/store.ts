@@ -96,17 +96,51 @@ export interface ItemBarObsSyncOpts {
   clock?: ItemBarObsClock;
 }
 
-function itemLine(state: ItemBarState): string | null {
+export function itemBarLine(state: ItemBarState): string | null {
   if (state.item.trim() === "") return null;
   return `${state.item} — ${state.price}`;
 }
 
-function itemVisible(state: ItemBarState): boolean {
+/** Item-bar SHOW/CLEAR owner: the line is on canvas. */
+export function itemBarCanvasVisible(state: ItemBarState): boolean {
   return state.onCanvas && state.item.trim() !== "";
 }
 
-function soldVisible(state: ItemBarState): boolean {
+/** Item-bar SOLD owner: the banner's timer is running. */
+export function soldBannerCanvasVisible(state: ItemBarState): boolean {
   return state.soldUntil !== null;
+}
+
+/** Seller hide-toggle for the two sources the item-bar path also owns.
+ * TextStyleObsSync publishes this; SHOW/SOLD/F5 read it so both writers
+ * push the AND of the two owners. */
+export interface ItemBarOverlayFlags {
+  itemBar: boolean;
+  soldBanner: boolean;
+}
+
+const DEFAULT_ITEM_BAR_OVERLAY_FLAGS: ItemBarOverlayFlags = { itemBar: true, soldBanner: true };
+
+let itemBarOverlayFlags: ItemBarOverlayFlags = { ...DEFAULT_ITEM_BAR_OVERLAY_FLAGS };
+
+export function setItemBarOverlayFlags(flags: ItemBarOverlayFlags): void {
+  itemBarOverlayFlags = { itemBar: flags.itemBar, soldBanner: flags.soldBanner };
+}
+
+export function getItemBarOverlayFlags(): ItemBarOverlayFlags {
+  return itemBarOverlayFlags;
+}
+
+export function resetItemBarOverlayFlags(): void {
+  itemBarOverlayFlags = { ...DEFAULT_ITEM_BAR_OVERLAY_FLAGS };
+}
+
+export function combinedItemBarEnabled(state: ItemBarState, overlayVisible: boolean): boolean {
+  return itemBarCanvasVisible(state) && overlayVisible;
+}
+
+export function combinedSoldBannerEnabled(state: ItemBarState, overlayVisible: boolean): boolean {
+  return soldBannerCanvasVisible(state) && overlayVisible;
 }
 
 /**
@@ -141,9 +175,11 @@ export class ItemBarObsSync {
   notify(prev: ItemBarState, next: ItemBarState): void {
     if (prev === next) return;
 
-    const prevLine = itemLine(prev);
-    const nextLine = itemLine(next);
-    const visChanged = itemVisible(prev) !== itemVisible(next) || soldVisible(prev) !== soldVisible(next);
+    const prevLine = itemBarLine(prev);
+    const nextLine = itemBarLine(next);
+    const visChanged =
+      itemBarCanvasVisible(prev) !== itemBarCanvasVisible(next) ||
+      soldBannerCanvasVisible(prev) !== soldBannerCanvasVisible(next);
 
     if (nextLine === null) {
       this.pendingText = undefined;
@@ -164,12 +200,12 @@ export class ItemBarObsSync {
   /** Push whatever the store currently holds — used when the socket comes back. */
   resync(state: ItemBarState): void {
     this.clearTimer();
-    const line = itemLine(state);
+    const line = itemBarLine(state);
     this.pendingText = line ?? undefined;
     this.enqueue(async () => {
       await this.flushText();
       // Force both flags so a reconnect matches the store, not our last guess.
-      await this.syncVisibility(initialItemBarState(), state);
+      await this.syncVisibility(initialItemBarState(), state, true);
     });
   }
 
@@ -200,16 +236,19 @@ export class ItemBarObsSync {
     await this.setInputText(ITEM_BAR_SOURCE, text);
   }
 
-  private async syncVisibility(prev: ItemBarState, next: ItemBarState): Promise<void> {
-    const showItem = itemVisible(next);
-    const showSold = soldVisible(next);
-    if (showSold && !soldVisible(prev)) {
+  private async syncVisibility(prev: ItemBarState, next: ItemBarState, force = false): Promise<void> {
+    const flags = getItemBarOverlayFlags();
+    const showItem = combinedItemBarEnabled(next, flags.itemBar);
+    const showSold = combinedSoldBannerEnabled(next, flags.soldBanner);
+    const wasItem = combinedItemBarEnabled(prev, flags.itemBar);
+    const wasSold = combinedSoldBannerEnabled(prev, flags.soldBanner);
+    if (showSold && !soldBannerCanvasVisible(prev)) {
       await this.setInputText(SOLD_BANNER_SOURCE, SOLD_BANNER_TEXT);
     }
-    if (itemVisible(prev) !== showItem) {
+    if (force || wasItem !== showItem) {
       await this.setSourceEnabled(ITEM_BAR_SOURCE, showItem);
     }
-    if (soldVisible(prev) !== showSold) {
+    if (force || wasSold !== showSold) {
       await this.setSourceEnabled(SOLD_BANNER_SOURCE, showSold);
     }
   }

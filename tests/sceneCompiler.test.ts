@@ -1,21 +1,36 @@
 import { describe, it, expect } from "vitest";
 import {
   applyOpsToState,
+  BREAK_CARD_SOURCE,
+  BREAK_CARD_TEXT_SETTINGS,
+  BREAK_CARD_TRANSFORM,
   buildDesiredScenes,
   CAMERA_FACING_SCENES,
   compileScenePlan,
+  contrastRatio,
+  cssHexToColorref,
   EMPTY_OBS_STATE,
+  fillUnreadableOnMat,
   fullCanvasFillTransform,
   ITEM_BAR_SOURCE,
   ITEM_BAR_TEXT_SETTINGS,
   ITEM_BAR_TRANSFORM,
+  nearestSnap,
+  overlayBox,
+  overlayInputSettings,
+  overlaySnapTransform,
+  overlaySourceName,
+  overlayStyleSettings,
   SOLD_BANNER_SOURCE,
   SOLD_BANNER_TEXT,
   SOLD_BANNER_TEXT_SETTINGS,
   SOLD_BANNER_TRANSFORM,
+  TEXT_SNAP_NAMES,
   TEXT_SOURCE_KIND,
+  WHATNOT_SAFE_BOTTOM,
+  WHATNOT_SAFE_TOP,
 } from "../src/obs/sceneCompiler.js";
-import { CANVAS_HEIGHT, type ShowConfig } from "../src/shared/types.js";
+import { CANVAS_HEIGHT, CANVAS_WIDTH, type ShowConfig } from "../src/shared/types.js";
 
 const config: ShowConfig = {
   showName: "Test Show",
@@ -168,7 +183,15 @@ describe("buildDesiredScenes", () => {
     const desired = buildDesiredScenes(config);
     const brk = desired.find((s) => s.sceneName === "BREAK")!;
     expect(brk.items.length).toBe(1);
-    expect(brk.items[0].sourceName).toBe("BREAK Card");
+    expect(brk.items[0].sourceName).toBe(BREAK_CARD_SOURCE);
+    expect(brk.items[0]).toMatchObject({
+      transform: BREAK_CARD_TRANSFORM,
+      inputSettings: BREAK_CARD_TEXT_SETTINGS,
+      enabled: true,
+    });
+    const hidden = buildDesiredScenes(config, { breakCard: false }).find((s) => s.sceneName === "BREAK")!;
+    expect(hidden.items[0].enabled).toBe(false);
+    expect(BREAK_CARD_TEXT_SETTINGS.outline).toBe(true);
     expect(brk.items.some((i) => i.sourceName === ITEM_BAR_SOURCE)).toBe(false);
     expect(brk.items.some((i) => i.sourceName === SOLD_BANNER_SOURCE)).toBe(false);
   });
@@ -195,8 +218,9 @@ describe("buildDesiredScenes", () => {
     }
   });
 
-  it("places the item bar in the bottom third and the SOLD banner above it", () => {
-    expect(ITEM_BAR_TRANSFORM.positionY).toBeGreaterThanOrEqual((CANVAS_HEIGHT * 2) / 3);
+  it("places the item bar above the Whatnot bid bar and the SOLD banner above it", () => {
+    const box = overlayBox("itemBar", "normal");
+    expect(ITEM_BAR_TRANSFORM.positionY + box.height).toBeLessThanOrEqual(CANVAS_HEIGHT - WHATNOT_SAFE_BOTTOM);
     expect(SOLD_BANNER_TRANSFORM.positionY).toBeLessThan(ITEM_BAR_TRANSFORM.positionY);
     expect(ITEM_BAR_TEXT_SETTINGS.outline).toBe(true);
     expect(ITEM_BAR_TEXT_SETTINGS.bk_opacity).toBeGreaterThan(0);
@@ -204,6 +228,67 @@ describe("buildDesiredScenes", () => {
     expect((SOLD_BANNER_TEXT_SETTINGS.font as { size: number }).size).toBeGreaterThan(
       (ITEM_BAR_TEXT_SETTINGS.font as { size: number }).size
     );
+  });
+
+  it("snap points sit in the named thirds and keep the box clear of Whatnot chrome on safe", () => {
+    const top = overlaySnapTransform("itemBar", "top", "normal");
+    const middle = overlaySnapTransform("itemBar", "middle", "normal");
+    const bottom = overlaySnapTransform("itemBar", "bottom", "normal");
+    const safe = overlaySnapTransform("itemBar", "safe", "normal");
+    expect(top.positionY).toBe(WHATNOT_SAFE_TOP);
+    expect(top.positionY).toBeLessThan(CANVAS_HEIGHT / 3);
+    expect(middle.positionY).toBeGreaterThanOrEqual(CANVAS_HEIGHT / 3);
+    expect(middle.positionY).toBeLessThan((CANVAS_HEIGHT * 2) / 3);
+    expect(bottom.positionY).toBeGreaterThanOrEqual((CANVAS_HEIGHT * 2) / 3);
+    expect(safe).toEqual(ITEM_BAR_TRANSFORM);
+    expect(safe.positionY + 320).toBeLessThanOrEqual(CANVAS_HEIGHT - WHATNOT_SAFE_BOTTOM);
+    expect(safe.positionY).toBeGreaterThanOrEqual(WHATNOT_SAFE_TOP);
+    expect(ITEM_BAR_TRANSFORM.positionX).toBe(Math.round((CANVAS_WIDTH - 1000) / 2));
+  });
+
+  it("dropping on a snap point returns that snap's exact transform", () => {
+    for (const snap of TEXT_SNAP_NAMES) {
+      const t = overlaySnapTransform("soldBanner", snap, "normal");
+      const found = nearestSnap("soldBanner", "normal", t.positionX, t.positionY);
+      expect(found.snap).toBe(snap);
+      expect(found.positionX).toBe(t.positionX);
+      expect(found.positionY).toBe(t.positionY);
+    }
+  });
+
+  it("warns when the fill cannot survive a black outline on a card mat", () => {
+    expect(fillUnreadableOnMat(0xffffff)).toBe(false);
+    expect(fillUnreadableOnMat(0x0028c8ff)).toBe(false);
+    expect(fillUnreadableOnMat(0x000000)).toBe(true);
+    expect(contrastRatio(0xffffff, 0x000000)).toBeGreaterThan(3);
+    expect(cssHexToColorref("#FFC828")).toBe(0x0028c8ff);
+    expect(overlaySourceName("itemBar")).toBe(ITEM_BAR_SOURCE);
+    const style = overlayStyleSettings("itemBar", { colorref: 0x000000ff, size: "huge" });
+    expect(style.color).toBe(0x000000ff);
+    expect((style.font as { size: number }).size).toBeGreaterThan(72);
+    expect(style.extents_cx).toBe(overlayBox("itemBar", "huge").width);
+    expect(style.extents_cx as number).toBeGreaterThan(overlayBox("itemBar", "normal").width);
+    expect(style).not.toHaveProperty("text");
+    const smuggled = overlayStyleSettings("itemBar", {
+      colorref: 0xffffff,
+      size: "normal",
+      text: "clobber me",
+    } as { colorref: number; size: "normal" });
+    expect(smuggled).not.toHaveProperty("text");
+    expect(overlayInputSettings("itemBar", { colorref: 0xffffff, size: "normal", text: "keep me" }).text).toBe(
+      "keep me"
+    );
+  });
+
+  it("overlay box width scales with small/normal/huge and stays on the canvas", () => {
+    const small = overlayBox("soldBanner", "small");
+    const normal = overlayBox("soldBanner", "normal");
+    const huge = overlayBox("soldBanner", "huge");
+    expect(small.width).toBeLessThan(normal.width);
+    expect(huge.width).toBeGreaterThan(normal.width);
+    expect(huge.width).toBeLessThanOrEqual(CANVAS_WIDTH);
+    expect(small.height).toBeLessThan(normal.height);
+    expect(huge.height).toBeGreaterThan(normal.height);
   });
 
   it("creates each overlay input once and leaves it disabled after a full compile", () => {
