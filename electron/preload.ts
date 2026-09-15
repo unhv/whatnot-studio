@@ -59,6 +59,27 @@ const api = {
     serverPassword?: string;
   }> => ipcRenderer.invoke("obs:websocketConfig"),
 
+  readObsWebsocketConfigSync: (): {
+    reason: "ok" | "missing-file" | "malformed" | "server-disabled";
+    serverEnabled?: boolean;
+    serverPort?: number;
+    authRequired?: boolean;
+    serverPassword?: string;
+  } => ipcRenderer.sendSync("obs:websocketConfigSync") as {
+    reason: "ok" | "missing-file" | "malformed" | "server-disabled";
+    serverEnabled?: boolean;
+    serverPort?: number;
+    authRequired?: boolean;
+    serverPassword?: string;
+  },
+
+  // Named-show list. Save payloads must already have gone through
+  // persistableShowConfig (password blank). loadShowStoreSync is the boot
+  // path so the first paint can be LIVE instead of Setup.
+  loadShowStore: (): Promise<unknown> => ipcRenderer.invoke("shows:load"),
+  loadShowStoreSync: (): unknown => ipcRenderer.sendSync("shows:loadSync"),
+  saveShowStore: (payload: unknown): Promise<void> => ipcRenderer.invoke("shows:save", payload),
+
   onHotkey: (callback: (key: "F1" | "F2" | "F3" | "F4" | "F5") => void): (() => void) => {
     const listener = (_event: unknown, key: "F1" | "F2" | "F3" | "F4" | "F5") => callback(key);
     ipcRenderer.on("hotkey", listener);

@@ -1,6 +1,7 @@
 import { subscribeObsLiveState, type LiveState } from "../obs/liveMode.js";
 import { syncScenes } from "../obs/applyPlan.js";
 import type { ObsClient } from "../obs/client.js";
+import { enumerateStudioDevices } from "../obs/devices.js";
 import { buildDesiredScenes } from "../obs/sceneCompiler.js";
 import { loadCameraLayout, type StorageLike } from "../state/cameraLayout.js";
 import { loadTextStyle } from "../state/textStyle.js";
@@ -135,6 +136,25 @@ export function startLiveScreenSession(opts: {
           scheduleRetry();
         },
       });
+      // Enumeration feeds the stored-camera re-check but must never block
+      // session setup or the listener re-attach behind an OBS request the
+      // seller's live session does not need to wait on — a slow or
+      // never-answered call here must not delay clearing inFlight, or a
+      // ConnectionClosed retry that arrives while it is outstanding is
+      // silently dropped.
+      void enumerateStudioDevices(client as ObsClient)
+        .then((devices) => {
+          if (!cancelled) {
+            useAppStore.getState().setDeviceEnum({
+              connected: true,
+              video: devices.video,
+              audio: devices.audio,
+            });
+          }
+        })
+        .catch(() => {
+          // Failed to list devices is not "enumerated without this camera".
+        });
     } catch {
       if (!cancelled) {
         applySocketDisconnect(Date.now());

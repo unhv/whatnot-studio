@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
   deviceDropdownPlaceholder,
   deviceFieldLabel,
+  setupContinueAllowed,
   setupDeviceBanner,
   setupDeviceKind,
   SETUP_NO_CAMERAS,
@@ -85,5 +86,47 @@ describe("setup screen — (optional) is not duplicated", () => {
     expect(src).toContain("SETUP_TRY_AGAIN");
     expect(src).toContain("retryRef.current");
     expect(src).toMatch(/obsAlreadyRunning:\s*deviceEnum\.connected/);
+  });
+});
+
+describe("setup screen — come back to a saved show", () => {
+  it("renders a named-show picker and a start-a-new-show action", () => {
+    expect(src).toContain("ShowPicker");
+    expect(src).toContain("Your shows");
+    expect(src).toContain("Start a new show");
+    expect(src).toContain("pickSavedShow");
+    expect(src).toContain("startNewShow");
+    expect(src).toContain("saveShowStore");
+    expect(src).toContain("persistableShowConfig");
+    expect(src).toContain("setupResumeMessage");
+  });
+
+  it("hydrates the picker from loadShowStoreSync so first paint is not empty", () => {
+    expect(src).toContain("loadShowStoreSync");
+    expect(src).toContain("loadSavedShowsNow");
+    expect(src).toMatch(/useState<ShowStoreState>\(loadSavedShowsNow\)/);
+  });
+});
+
+describe("setup screen — Continue is disabled while a stored camera is known-missing", () => {
+  it("setupContinueAllowed is false whenever storedCameraMissing is true, even with a name and camera set", () => {
+    const camera: DeviceChoice = { deviceId: "cam-a", label: "Face cam" };
+    expect(
+      setupContinueAllowed({ showName: "Saturday", camera, starting: false, storedCameraMissing: true })
+    ).toBe(false);
+    expect(
+      setupContinueAllowed({ showName: "Saturday", camera, starting: false, storedCameraMissing: false })
+    ).toBe(true);
+  });
+
+  it("wires canContinue from setupResumeMessage and clears it via setSetupResumeMessage when picking a camera", () => {
+    expect(src).toMatch(/storedCameraMissing:\s*setupResumeMessage\s*!==\s*null/);
+    expect(src).toContain("setSetupResumeMessage(null)");
+  });
+
+  it("resumes a picked saved show through resumePickedShow, not a second ad-hoc rule", () => {
+    expect(src).toContain("resumePickedShow");
+    expect(src).toMatch(/if\s*\(picked\.goLive\)\s*goToLive\(\)/);
+    expect(src).toContain("setSetupResumeMessage(picked.decision.setupResumeMessage)");
   });
 });

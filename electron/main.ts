@@ -14,7 +14,7 @@
  * See src/obs/client.ts for the full rule.
  */
 import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, shell } from "electron";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -25,6 +25,12 @@ import { PROFILE_NAME } from "../src/shared/types.js";
 import { errorCodeFromUnknown, obsWebsocketConfigFromRead } from "../src/obs/obsConfig.js";
 import { durationMsFromBytes } from "../src/clips/duration.js";
 import { isSupportedClipExtension, uniqueClipFileName } from "../src/clips/scan.js";
+import {
+  readShowStoreFile,
+  readShowStoreFileSync,
+  showStorePath,
+  writeShowStoreFile,
+} from "./configStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -123,6 +129,29 @@ function registerHotkeys(): void {
 }
 
 app.whenReady().then(() => {
+  // Show-store IPC must be up before the window loads: the renderer
+  // rehydrates synchronously on first paint via sendSync.
+  const showsFile = () => showStorePath(app.getPath("userData"));
+
+  ipcMain.on("shows:loadSync", (event) => {
+    event.returnValue = readShowStoreFileSync(showsFile());
+  });
+
+  ipcMain.handle("shows:load", async () => readShowStoreFile(showsFile()));
+
+  ipcMain.handle("shows:save", async (_event, payload: unknown) => {
+    await writeShowStoreFile(showsFile(), payload);
+  });
+
+  ipcMain.on("obs:websocketConfigSync", (event) => {
+    try {
+      const text = readFileSync(OBS_WEBSOCKET_CONFIG, "utf8");
+      event.returnValue = obsWebsocketConfigFromRead({ ok: true, text });
+    } catch (err) {
+      event.returnValue = obsWebsocketConfigFromRead({ ok: false, code: errorCodeFromUnknown(err) });
+    }
+  });
+
   createWindow();
   registerHotkeys();
 

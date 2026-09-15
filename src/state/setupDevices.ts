@@ -125,6 +125,17 @@ export function deviceFieldLabel(label: string, optional?: boolean): string {
   return `${label} (optional)`;
 }
 
+/** Continue stays off while the stored camera is known-missing. */
+export function setupContinueAllowed(args: {
+  showName: string;
+  camera: DeviceChoice | null;
+  starting: boolean;
+  storedCameraMissing: boolean;
+}): boolean {
+  if (args.starting || args.storedCameraMissing) return false;
+  return args.showName.trim() !== "" && args.camera !== null;
+}
+
 /** Pick the OBS-reported choice by ID. Returns that object unmodified. */
 export function selectDeviceChoice(devices: DeviceChoice[], deviceId: string): DeviceChoice | null {
   if (deviceId === "") return null;
