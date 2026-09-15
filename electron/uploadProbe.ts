@@ -120,15 +120,9 @@ export async function runUploadProbe(deps: UploadProbeDeps = {}): Promise<Upload
     return { outcome: "timeout", sustainedKbps: null, loadedRttMs: median(rtts) };
   }
 
-  // Normal slow-start trimming. If the test window is short enough (or a
-  // round cap cut it short) that every sample falls inside the slow-start
-  // period, there is nothing left to trim away -- fall back to the raw
-  // untrimmed rate rather than reporting a healthy, completed test as
-  // "failed" for lack of a discardable warm-up.
-  let sustainedKbps = sustainedKbpsFromSamples(samples);
-  if (sustainedKbps == null) {
-    sustainedKbps = sustainedKbpsFromSamples(samples, 0);
-  }
+  // Incomplete if every sample is still in slow-start. Do not untrim:
+  // a one-millisecond burst is not a sustained rate and would select Best.
+  const sustainedKbps = sustainedKbpsFromSamples(samples);
   if (sustainedKbps == null) {
     return {
       outcome: "failed",
