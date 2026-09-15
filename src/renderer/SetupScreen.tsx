@@ -1,28 +1,48 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../state/store.js";
+import {
+  deviceDropdownPlaceholder,
+  deviceFieldLabel,
+  selectDeviceChoice,
+  setupDeviceBanner,
+  SETUP_TRY_AGAIN,
+} from "../state/setupDevices.js";
 import type { DeviceChoice } from "../shared/types.js";
 import { runAppFirstRun } from "../obs/runSetup.js";
 import { RealObsClient } from "../obs/client.js";
+import { startSetupDeviceSession } from "../obs/devices.js";
 
 /** Setup screen: this IS the first-run wizard, per the brief — nothing
  * else is built as a separate flow. Three dropdowns, a show name, and a
- * copy-password button. Device enumeration and live thumbnails both need
- * a running OBS to populate (GetInputPropertiesListPropertyItems /
- * GetSourceScreenshot) — see HANDOVER.md. This screen renders correctly
- * with an empty device list so it is still buildable and testable
- * end-to-end for layout without OBS. */
+ * copy-password button. Device lists come from OBS via
+ * GetInputPropertiesListPropertyItems (never browser enumerateDevices). */
 export default function SetupScreen() {
   const showConfig = useAppStore((s) => s.showConfig);
   const setShowConfig = useAppStore((s) => s.setShowConfig);
   const goToLive = useAppStore((s) => s.goToLive);
-
-  // Populated by src/obs (device enumeration) once connected to OBS — see
-  // HANDOVER.md. Empty here is a correct, renderable state, not a bug.
-  const [devices] = useState<DeviceChoice[]>([]);
+  const deviceEnum = useAppStore((s) => s.deviceEnum);
   const [starting, setStarting] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const retryRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    const client = new RealObsClient();
+    const session = startSetupDeviceSession({
+      client,
+      url: `ws://127.0.0.1:${showConfig.obsPort}`,
+      password: showConfig.obsPassword,
+    });
+    retryRef.current = () => session.retry();
+    return () => {
+      retryRef.current = () => {};
+      session.stop();
+    };
+  }, [showConfig.obsPort, showConfig.obsPassword]);
 
   const canContinue = showConfig.showName.trim() !== "" && showConfig.camera !== null && !starting;
+  const banner = setupDeviceBanner(deviceEnum);
+  const videoDevices = deviceEnum.video;
+  const audioDevices = deviceEnum.audio;
 
   async function handleContinue() {
     setStarting(true);
@@ -51,7 +71,8 @@ export default function SetupScreen() {
   }
 
   function pickDevice(kind: "camera" | "mic" | "captureCard", deviceId: string) {
-    const choice = devices.find((d) => d.deviceId === deviceId) ?? null;
+    const list = kind === "mic" ? audioDevices : videoDevices;
+    const choice = selectDeviceChoice(list, deviceId);
     setShowConfig({ [kind]: choice } as Partial<typeof showConfig>);
   }
 
@@ -71,6 +92,20 @@ export default function SetupScreen() {
     <div className="flex min-h-screen w-full flex-col gap-6 bg-neutral-950 p-8 text-neutral-100">
       <h1 className="text-2xl font-semibold">Whatnot Studio — Setup</h1>
 
+      {banner && (
+        <div className="flex flex-col gap-3 rounded-md bg-neutral-900 px-4 py-4 ring-1 ring-neutral-800">
+          <p className="text-base">{banner.title}</p>
+          {banner.body && <p className="text-sm text-neutral-400">{banner.body}</p>}
+        </div>
+      )}
+
+      <button
+        className="w-fit rounded-md bg-neutral-800 px-4 py-3 text-sm hover:bg-neutral-700"
+        onClick={() => retryRef.current()}
+      >
+        {SETUP_TRY_AGAIN}
+      </button>
+
       <label className="flex flex-col gap-2">
         <span className="text-sm text-neutral-400">Show name</span>
         <input
@@ -82,23 +117,28 @@ export default function SetupScreen() {
       </label>
 
       <DeviceDropdown
-        label="Camera"
-        devices={devices}
+        label={deviceFieldLabel("Camera")}
+        devices={videoDevices}
         value={showConfig.camera}
+        placeholder={deviceDropdownPlaceholder(deviceEnum.connected, "camera", videoDevices.length)}
+        disabled={!deviceEnum.connected}
         onChange={(id) => pickDevice("camera", id)}
       />
       <DeviceDropdown
-        label="Microphone"
-        devices={devices}
+        label={deviceFieldLabel("Microphone")}
+        devices={audioDevices}
         value={showConfig.mic}
+        placeholder={deviceDropdownPlaceholder(deviceEnum.connected, "mic", audioDevices.length)}
+        disabled={!deviceEnum.connected}
         onChange={(id) => pickDevice("mic", id)}
       />
       <DeviceDropdown
-        label="Capture card (optional)"
-        devices={devices}
+        label={deviceFieldLabel("Capture card", true)}
+        devices={videoDevices}
         value={showConfig.captureCard}
+        placeholder={deviceDropdownPlaceholder(deviceEnum.connected, "captureCard", videoDevices.length)}
+        disabled={!deviceEnum.connected}
         onChange={(id) => pickDevice("captureCard", id)}
-        optional
       />
 
       <div className="flex items-center gap-3">
@@ -138,22 +178,21 @@ function DeviceDropdown(props: {
   label: string;
   devices: DeviceChoice[];
   value: DeviceChoice | null;
+  placeholder: string;
+  disabled?: boolean;
   onChange: (deviceId: string) => void;
-  optional?: boolean;
 }) {
   return (
     <label className="flex flex-col gap-2">
-      <span className="text-sm text-neutral-400">
-        {props.label}
-        {props.optional ? " (optional)" : ""}
-      </span>
+      <span className="text-sm text-neutral-400">{props.label}</span>
       <div className="flex items-center gap-3">
         <select
-          className="flex-1 rounded-md bg-neutral-900 px-4 py-3 text-base outline-none ring-1 ring-neutral-800 focus:ring-neutral-500"
+          className="flex-1 rounded-md bg-neutral-900 px-4 py-3 text-base outline-none ring-1 ring-neutral-800 focus:ring-neutral-500 disabled:text-neutral-500"
           value={props.value?.deviceId ?? ""}
+          disabled={props.disabled}
           onChange={(e) => props.onChange(e.target.value)}
         >
-          <option value="">{props.devices.length === 0 ? "No devices detected" : "Select…"}</option>
+          <option value="">{props.placeholder}</option>
           {props.devices.map((d) => (
             <option key={d.deviceId} value={d.deviceId}>
               {d.label}

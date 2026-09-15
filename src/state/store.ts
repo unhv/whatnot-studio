@@ -12,6 +12,7 @@
 import { create } from "zustand";
 import { SCENE_KEYS, type SceneKey, type ShowConfig } from "../shared/types.js";
 import { initialItemBarState, itemBarReducer, type ItemBarAction, type ItemBarState } from "./itemBar.js";
+import { initialDeviceEnum, type DeviceEnumState } from "./setupDevices.js";
 import {
   deriveLiveState,
   deriveSocketDisconnect,
@@ -37,8 +38,12 @@ export interface AppState {
   itemBar: ItemBarState;
   live: LiveState;
   connectionStatus: "disconnected" | "connecting" | "connected" | "error";
+  /** Setup-screen OBS device list. Independent of live.connectionStatus
+   * so enumerating on Setup cannot clobber the LIVE screen's socket flag. */
+  deviceEnum: DeviceEnumState;
 
   setShowConfig(config: Partial<ShowConfig>): void;
+  setDeviceEnum(enumState: DeviceEnumState): void;
   goToLive(): void;
   goToSetup(): void;
   setActiveScene(scene: SceneKey): void;
@@ -299,8 +304,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   itemBar: initialItemBarState(),
   live: initialLiveState(Date.now()),
   connectionStatus: "disconnected",
+  deviceEnum: initialDeviceEnum(),
 
   setShowConfig: (config) => set((s) => ({ showConfig: { ...s.showConfig, ...config } })),
+  setDeviceEnum: (deviceEnum) => set({ deviceEnum }),
   goToLive: () => set({ screen: "live" }),
   goToSetup: () =>
     set((s) => (s.live.live ? s : { screen: "setup" })), // "Setup" link is disabled while LIVE
