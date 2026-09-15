@@ -78,6 +78,37 @@ export function computeCropToFill(
   };
 }
 
+/**
+ * Compute a "contain" transform: scale uniformly to fit inside the target,
+ * centered, with no crop. Letterboxing is the point — framed meme content
+ * must stay whole on a 9:16 canvas.
+ */
+export function computeContain(
+  sourceW: number,
+  sourceH: number,
+  targetW: number,
+  targetH: number
+): CropToFill {
+  if (sourceW <= 0 || sourceH <= 0 || targetW <= 0 || targetH <= 0) {
+    throw new Error("computeContain: all dimensions must be positive");
+  }
+
+  const scale = Math.min(targetW / sourceW, targetH / sourceH);
+  const scaledW = sourceW * scale;
+  const scaledH = sourceH * scale;
+
+  return {
+    cropLeft: 0,
+    cropRight: 0,
+    cropTop: 0,
+    cropBottom: 0,
+    scaleX: scale,
+    scaleY: scale,
+    positionX: (targetW - scaledW) / 2,
+    positionY: (targetH - scaledH) / 2,
+  };
+}
+
 /** Minimal INI-style key=value reader, scoped to a single [Section]. */
 export function readIniSection(text: string, section: string): Record<string, string> {
   const lines = text.split(/\r?\n/);

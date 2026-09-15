@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 export interface FirstRunPaths {
   profileIniPath: string;
@@ -26,6 +26,23 @@ const api = {
   closeObs: (pid: number): Promise<void> => ipcRenderer.invoke("obs:close", pid),
 
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke("shell:openExternal", url),
+
+  clipsDir: (): Promise<string> => ipcRenderer.invoke("clips:dir"),
+  clipsMkdir: (dir: string): Promise<void> => ipcRenderer.invoke("clips:mkdir", dir),
+  clipsReaddir: (dir: string): Promise<string[]> => ipcRenderer.invoke("clips:readdir", dir),
+  clipsExists: (filePath: string): Promise<boolean> => ipcRenderer.invoke("clips:exists", filePath),
+  clipsDurationMs: (filePath: string): Promise<number | null> => ipcRenderer.invoke("clips:durationMs", filePath),
+  clipsImport: (sourcePath: string): Promise<string | null> => ipcRenderer.invoke("clips:import", sourcePath),
+  clipsWrite: (fileName: string, data: ArrayBuffer): Promise<string | null> =>
+    ipcRenderer.invoke("clips:write", fileName, data),
+  pathForFile: (file: File): string => {
+    try {
+      const found = webUtils.getPathForFile(file);
+      return typeof found === "string" ? found : "";
+    } catch {
+      return "";
+    }
+  },
 
   // Whatnot requires Chrome specifically for Show Tools -- see electron/main.ts.
   openInChrome: (url: string): Promise<void> => ipcRenderer.invoke("shell:openInChrome", url),

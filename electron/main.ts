@@ -23,6 +23,8 @@ import { closeObs, launchObsForProductAsync, waitForPort } from "../src/obs/laun
 import { profileDirName, sceneCollectionFileName } from "../src/obs/firstRun.js";
 import { PROFILE_NAME } from "../src/shared/types.js";
 import { errorCodeFromUnknown, obsWebsocketConfigFromRead } from "../src/obs/obsConfig.js";
+import { durationMsFromBytes } from "../src/clips/duration.js";
+import { isSupportedClipExtension, uniqueClipFileName } from "../src/clips/scan.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -168,6 +170,95 @@ app.whenReady().then(() => {
 
   ipcMain.handle("shell:openExternal", async (_event, url: string) => {
     await shell.openExternal(url);
+  });
+
+  // Clips folder lives under userData. The renderer is sandboxed and cannot
+  // import node:fs, so scan/exists/mkdir go through here.
+  const clipsFolder = () => path.join(app.getPath("userData"), "clips");
+
+  ipcMain.handle("clips:dir", async () => {
+    const dir = clipsFolder();
+    await fs.mkdir(dir, { recursive: true });
+    return dir;
+  });
+
+  ipcMain.handle("clips:mkdir", async (_event, dir: string) => {
+    if (typeof dir !== "string" || dir === "") return;
+    await fs.mkdir(dir, { recursive: true });
+  });
+
+  ipcMain.handle("clips:readdir", async (_event, dir: string) => {
+    if (typeof dir !== "string" || dir === "") return [];
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle("clips:exists", async (_event, filePath: string) => {
+    if (typeof filePath !== "string" || filePath === "") return false;
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  function isInsideClips(filePath: string): boolean {
+    const root = path.resolve(clipsFolder());
+    const resolved = path.resolve(filePath);
+    const rel = path.relative(root, resolved);
+    return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+  }
+
+  ipcMain.handle("clips:durationMs", async (_event, filePath: string) => {
+    if (typeof filePath !== "string" || filePath === "" || !isInsideClips(filePath)) return null;
+    try {
+      const buf = await fs.readFile(filePath);
+      return durationMsFromBytes(buf, path.basename(filePath));
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("clips:import", async (_event, sourcePath: string) => {
+    if (typeof sourcePath !== "string" || sourcePath === "") return null;
+    const resolved = path.resolve(sourcePath);
+    const base = path.basename(resolved);
+    if (!isSupportedClipExtension(base)) return null;
+    const dir = clipsFolder();
+    await fs.mkdir(dir, { recursive: true });
+    if (isInsideClips(resolved)) return resolved;
+    try {
+      const names = await fs.readdir(dir);
+      const destName = uniqueClipFileName(names, base);
+      const dest = path.join(dir, destName);
+      await fs.copyFile(resolved, dest);
+      return dest;
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("clips:write", async (_event, fileName: string, data: ArrayBuffer | Uint8Array) => {
+    if (typeof fileName !== "string" || fileName === "") return null;
+    const base = path.basename(fileName);
+    if (!isSupportedClipExtension(base) || !data) return null;
+    const dir = clipsFolder();
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      const names = await fs.readdir(dir);
+      const destName = uniqueClipFileName(names, base);
+      const dest = path.join(dir, destName);
+      const buf = Buffer.from(data instanceof Uint8Array ? data : new Uint8Array(data));
+      await fs.writeFile(dest, buf);
+      return dest;
+    } catch {
+      return null;
+    }
   });
 
   ipcMain.handle("shell:openInChrome", async (_event, url: string) => {

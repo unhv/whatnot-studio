@@ -10,7 +10,7 @@
  * inputs yields deep-equal output), and applying its ops to `current`
  * converges: compiling again against the post-apply state yields zero ops.
  */
-import { computeCropToFill, type CropToFill } from "../../spike/lib.js";
+import { computeContain, computeCropToFill, type CropToFill } from "../../spike/lib.js";
 import {
   bothCameraTransforms,
   DEFAULT_CAMERA_LAYOUT,
@@ -148,6 +148,26 @@ export const ITEM_BAR_SOURCE = "Item Bar";
 export const SOLD_BANNER_SOURCE = "SOLD Banner";
 export const TEXT_SOURCE_KIND = "text_gdiplus_v3";
 export const CAMERA_FACING_SCENES = ["ME", "TABLE", "BOTH"] as const;
+
+/** One ffmpeg_source shared across camera-facing scenes. Runtime points it
+ * at a clip file and toggles the scene item; the compiler only creates it. */
+export const CLIP_OVERLAY_SOURCE = "Meme Clip";
+export const CLIP_OVERLAY_KIND = "ffmpeg_source";
+
+export const CLIP_OVERLAY_SETTINGS: Record<string, unknown> = {
+  is_local_file: true,
+  local_file: "",
+  looping: false,
+  close_when_inactive: true,
+};
+
+/** Placeholder only. Play fits each file from its real sourceWidth/Height. */
+export const CLIP_OVERLAY_TRANSFORM: Transform = identityTransform();
+
+/** Scale a media source to fit inside the 1080×1920 canvas, centred, no crop. */
+export function containCanvasTransform(sourceW: number, sourceH: number): Transform {
+  return cropToTransform(computeContain(sourceW, sourceH, CANVAS_WIDTH, CANVAS_HEIGHT));
+}
 export const SOLD_BANNER_TEXT = "SOLD!";
 
 export const TEXT_OVERLAY_IDS = ["itemBar", "soldBanner", "breakCard"] as const;
@@ -414,7 +434,7 @@ export function canvasPointFromPreview(
   };
 }
 
-function identityTransform(): Transform {
+export function identityTransform(): Transform {
   return {
     positionX: 0,
     positionY: 0,
@@ -442,6 +462,13 @@ function cameraFacingOverlays(): DesiredSceneItem[] {
       sourceKind: TEXT_SOURCE_KIND,
       inputSettings: SOLD_BANNER_TEXT_SETTINGS,
       transform: SOLD_BANNER_TRANSFORM,
+      enabled: false,
+    },
+    {
+      sourceName: CLIP_OVERLAY_SOURCE,
+      sourceKind: CLIP_OVERLAY_KIND,
+      inputSettings: CLIP_OVERLAY_SETTINGS,
+      transform: CLIP_OVERLAY_TRANSFORM,
       enabled: false,
     },
   ];
