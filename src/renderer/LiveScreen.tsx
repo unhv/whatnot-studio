@@ -10,6 +10,7 @@ import {
   returnToSetup,
   startLiveScreenSession,
 } from "./liveScreenSession.js";
+import AudioPanel from "./AudioPanel.js";
 
 const SCENE_HOTKEYS: Record<SceneKey, string> = { ME: "F1", TABLE: "F2", BOTH: "F3", BREAK: "F4" };
 
@@ -19,8 +20,6 @@ export default function LiveScreen() {
   const live = useAppStore((s) => s.live);
   const activeScene = useAppStore((s) => s.activeScene);
   const setActiveScene = useAppStore((s) => s.setActiveScene);
-  const micMuted = useAppStore((s) => s.micMuted);
-  const setMicMuted = useAppStore((s) => s.setMicMuted);
   const itemBar = useAppStore((s) => s.itemBar);
   const dispatchItemBar = useAppStore((s) => s.dispatchItemBar);
   const obsPort = useAppStore((s) => s.showConfig.obsPort);
@@ -201,15 +200,7 @@ export default function LiveScreen() {
         {selling ? "SOLD!" : "SOLD! (F5)"}
       </button>
 
-      {/* Mic mute — the whole row turns red when muted. */}
-      <button
-        className={`flex h-16 items-center justify-center rounded-md text-lg font-semibold ${
-          micMuted ? "bg-red-600 text-white" : "bg-neutral-900 text-neutral-100 hover:bg-neutral-800"
-        }`}
-        onClick={() => setMicMuted(!micMuted)}
-      >
-        {micMuted ? "MUTED" : "MUTE"}
-      </button>
+      <AudioPanel />
     </div>
   );
 }
