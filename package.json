@@ -10,9 +10,10 @@
     "test": "vitest run",
     "dev:renderer": "vite",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:electron": "tsc -p electron/tsconfig.json && tsc -p electron/tsconfig.preload.json",
     "build": "npm run build:renderer && npm run build:electron",
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "npm run build && electron-builder --win nsis"
   },
   "license": "UNLICENSED",
   "devDependencies": {
@@ -22,6 +23,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "tsx": "^4.19.2",
@@ -34,5 +36,46 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "zustand": "^5.0.2"
+  },
+  "build": {
+    "appId": "com.whatnotstudio.app",
+    "productName": "Whatnot Studio",
+    "copyright": "Copyright © Whatnot Studio",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "package.json",
+      "dist-electron/**/*",
+      {
+        "from": "dist",
+        "to": "dist-electron/dist",
+        "filter": ["**/*"]
+      }
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "compression": "normal",
+    "afterPack": "./build/afterPack.cjs",
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Whatnot Studio",
+      "uninstallDisplayName": "Whatnot Studio"
+    }
   }
 }

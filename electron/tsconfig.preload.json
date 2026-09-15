@@ -1,18 +1,16 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "Bundler",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
     "lib": ["ES2022"],
     "types": ["node"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
     "outDir": "../dist-electron",
     "rootDir": "..",
     "noEmit": false
   },
-  "include": ["main.ts", "../src/obs/**/*.ts", "../src/shared/**/*.ts", "../spike/lib.ts", "../spike/obs-launcher.ts"]
+  "include": ["preload.ts"]
 }
-
