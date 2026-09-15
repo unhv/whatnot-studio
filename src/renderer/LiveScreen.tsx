@@ -1,9 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../state/store.js";
-import { elapsedMs } from "../obs/liveMode.js";
+import { elapsedMs, liveScreenCopy } from "../obs/liveMode.js";
+import { RealObsClient } from "../obs/client.js";
 import { formatElapsed, formatPrice } from "../shared/format.js";
 import { deriveLowerThirdText } from "../state/itemBar.js";
 import { SCENE_KEYS, type SceneKey } from "../shared/types.js";
+import {
+  canReturnToSetup,
+  returnToSetup,
+  startLiveScreenSession,
+} from "./liveScreenSession.js";
 
 const SCENE_HOTKEYS: Record<SceneKey, string> = { ME: "F1", TABLE: "F2", BOTH: "F3", BREAK: "F4" };
 
@@ -17,9 +23,29 @@ export default function LiveScreen() {
   const setMicMuted = useAppStore((s) => s.setMicMuted);
   const itemBar = useAppStore((s) => s.itemBar);
   const dispatchItemBar = useAppStore((s) => s.dispatchItemBar);
-  const goToSetup = useAppStore((s) => s.goToSetup);
+  const obsPort = useAppStore((s) => s.showConfig.obsPort);
+  const obsPassword = useAppStore((s) => s.showConfig.obsPassword);
 
   const [now, setNow] = useState(() => Date.now());
+  const retryNowRef = useRef<() => void>(() => {});
+
+  // First-run's ObsClient is discarded after setup; this is the session
+  // listener that actually folds StreamStateChanged / ConnectionClosed
+  // into the store so RECONNECTING and a socket drop reach the seller.
+  useEffect(() => {
+    const client = new RealObsClient();
+    const session = startLiveScreenSession({
+      client,
+      url: `ws://127.0.0.1:${obsPort}`,
+      password: obsPassword,
+    });
+    retryNowRef.current = () => session.retryNow();
+    return () => {
+      retryNowRef.current = () => {};
+      session.stop();
+    };
+  }, [obsPort, obsPassword]);
+
   useEffect(() => {
     const id = setInterval(() => {
       const t = Date.now();
@@ -33,6 +59,12 @@ export default function LiveScreen() {
   const [priceDraft, setPriceDraft] = useState("");
   const lowerThird = deriveLowerThirdText(itemBar);
   const selling = itemBar.soldUntil !== null;
+  const status = liveScreenCopy(live);
+  const statusDotClass = live.live
+    ? "text-red-500"
+    : live.connecting
+      ? "text-amber-400"
+      : "text-neutral-500";
 
   function showItem() {
     if (itemDraft.trim() === "") return;
@@ -55,17 +87,35 @@ export default function LiveScreen() {
       {/* Status strip. No Go Live button, ever — this only ever reflects
           StreamStateChanged from Whatnot's own Show Tools page. */}
       <div className="flex items-center justify-between rounded-md bg-neutral-900 px-4 py-3">
-        <div className="flex items-center gap-2 text-lg font-semibold">
-          <span className={live.live ? "text-red-500" : "text-neutral-500"}>●</span>
-          <span>{live.live ? `LIVE ${formatElapsed(elapsedMs(live, now))}` : "NOT LIVE"}</span>
+        <div className="flex items-start gap-2">
+          <span className={`${statusDotClass} mt-1 text-lg leading-none`}>●</span>
+          <div>
+            <div className="text-lg font-semibold">
+              {status.primary}
+              {status.showElapsed ? ` ${formatElapsed(elapsedMs(live, now))}` : ""}
+            </div>
+            {status.secondary ? (
+              <div className="text-sm font-normal text-amber-200/80">{status.secondary}</div>
+            ) : null}
+          </div>
         </div>
-        <button
-          className="text-sm text-neutral-400 underline disabled:cursor-not-allowed disabled:text-neutral-700 disabled:no-underline"
-          disabled={live.live}
-          onClick={goToSetup}
-        >
-          Setup
-        </button>
+        <div className="flex items-center gap-3">
+          {live.socketDisconnected ? (
+            <button
+              className="rounded-md bg-neutral-800 px-4 py-2 text-sm font-semibold text-neutral-100 hover:bg-neutral-700"
+              onClick={() => retryNowRef.current()}
+            >
+              Reconnect
+            </button>
+          ) : null}
+          <button
+            className="text-sm text-neutral-400 underline disabled:cursor-not-allowed disabled:text-neutral-700 disabled:no-underline"
+            disabled={!canReturnToSetup(live)}
+            onClick={returnToSetup}
+          >
+            Setup
+          </button>
+        </div>
       </div>
 
       {/* Preview, ~270px wide portrait, not clickable. Populated by polling

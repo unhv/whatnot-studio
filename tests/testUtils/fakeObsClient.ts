@@ -35,11 +35,24 @@ export class FakeObsClient implements ObsClient {
     return entry as T;
   }
 
-  on(): void {
-    // no-op: nothing in this repo's tests needs event delivery from the fake
+  private listeners = new Map<string, Set<(data: unknown) => void>>();
+
+  on(event: string, listener: (data: unknown) => void): void {
+    let set = this.listeners.get(event);
+    if (!set) {
+      set = new Set();
+      this.listeners.set(event, set);
+    }
+    set.add(listener);
   }
 
-  off(): void {
-    // no-op
+  off(event: string, listener: (data: unknown) => void): void {
+    this.listeners.get(event)?.delete(listener);
+  }
+
+  emit(event: string, data?: unknown): void {
+    for (const listener of [...(this.listeners.get(event) ?? [])]) {
+      listener(data);
+    }
   }
 }

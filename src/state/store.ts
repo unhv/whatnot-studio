@@ -8,7 +8,13 @@
 import { create } from "zustand";
 import { SCENE_KEYS, type SceneKey, type ShowConfig } from "../shared/types.js";
 import { initialItemBarState, itemBarReducer, type ItemBarAction, type ItemBarState } from "./itemBar.js";
-import { initialLiveState, type LiveState } from "../obs/liveMode.js";
+import {
+  deriveLiveState,
+  deriveSocketDisconnect,
+  initialLiveState,
+  type LiveState,
+  type StreamStateChangedEvent,
+} from "../obs/liveMode.js";
 
 export type Screen = "setup" | "live";
 
@@ -27,7 +33,11 @@ export interface AppState {
   setActiveScene(scene: SceneKey): void;
   setMicMuted(muted: boolean): void;
   dispatchItemBar(action: ItemBarAction): void;
-  setLive(live: LiveState): void;
+  /** Fold one StreamStateChanged event. Never replace LiveState wholesale
+   * — deriveLiveState needs `prev` so RECONNECTING stays live. */
+  applyStreamStateChanged(event: StreamStateChangedEvent, now?: number): void;
+  /** Losing obs-websocket is not the show ending. */
+  applySocketDisconnect(now?: number): void;
   setConnectionStatus(status: AppState["connectionStatus"]): void;
 }
 
@@ -56,6 +66,9 @@ export const useAppStore = create<AppState>((set) => ({
   setActiveScene: (scene) => set({ activeScene: scene }),
   setMicMuted: (muted) => set({ micMuted: muted }),
   dispatchItemBar: (action) => set((s) => ({ itemBar: itemBarReducer(s.itemBar, action) })),
-  setLive: (live) => set({ live }),
+  applyStreamStateChanged: (event, now = Date.now()) =>
+    set((s) => ({ live: deriveLiveState(s.live, event, now) })),
+  applySocketDisconnect: (now = Date.now()) =>
+    set((s) => ({ live: deriveSocketDisconnect(s.live, now) })),
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 }));
