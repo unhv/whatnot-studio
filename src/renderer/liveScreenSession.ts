@@ -1,5 +1,7 @@
 import { subscribeObsLiveState, type LiveState } from "../obs/liveMode.js";
+import { syncScenes } from "../obs/applyPlan.js";
 import type { ObsClient } from "../obs/client.js";
+import { buildDesiredScenes } from "../obs/sceneCompiler.js";
 import { useAppStore } from "../state/store.js";
 
 export const STUDIO_RETRY_MS = 2000;
@@ -26,14 +28,20 @@ export function returnToSetup(): void {
  * arrives and the seller cannot leave this screen.
  */
 export function startLiveScreenSession(opts: {
-  client: Pick<ObsClient, "connect" | "disconnect" | "on" | "off">;
+  client: Pick<ObsClient, "connect" | "disconnect" | "on" | "off" | "call">;
   url: string;
   password?: string;
   retryMs?: number;
+  /** Override for tests. Default applies `buildDesiredScenes` once per session. */
+  applyScenes?: (client: Pick<ObsClient, "call">) => Promise<void>;
 }): { stop: () => void; retryNow: () => void } {
   const { client, url, password, retryMs = STUDIO_RETRY_MS } = opts;
+  const applyScenes =
+    opts.applyScenes ??
+    ((obs) => syncScenes(obs as ObsClient, buildDesiredScenes(useAppStore.getState().showConfig)));
   let cancelled = false;
   let inFlight = false;
+  let scenesApplied = false;
   let unsubscribe = () => {};
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -69,6 +77,23 @@ export function startLiveScreenSession(opts: {
         // already closed
       }
       await client.connect(url, password);
+      if (cancelled) {
+        await client.disconnect();
+        return;
+      }
+      // First-run writes a one-scene skeleton named "Scene". The Item Bar
+      // and SOLD Banner only exist after this plan lands. Run once per
+      // session — compiling again would SetSceneItemEnabled(false) on the
+      // overlays and hide whatever the seller currently has on canvas.
+      if (!scenesApplied) {
+        try {
+          await applyScenes(client);
+          scenesApplied = true;
+        } catch {
+          // overlays missing until the next successful apply; going live
+          // and the item-bar UI must not throw
+        }
+      }
       if (cancelled) {
         await client.disconnect();
         return;

@@ -137,12 +137,119 @@ export function tileFillTransform(tileW: number, tileH: number, offsetX: number,
 const BREAK_CARD_SOURCE = "BREAK Card";
 const BREAK_CARD_KIND = "text_gdiplus_v3";
 
+/** Same input name in every camera-facing scene so one SetInputSettings updates all of them. */
+export const ITEM_BAR_SOURCE = "Item Bar";
+export const SOLD_BANNER_SOURCE = "SOLD Banner";
+export const TEXT_SOURCE_KIND = "text_gdiplus_v3";
+export const CAMERA_FACING_SCENES = ["ME", "TABLE", "BOTH"] as const;
+export const SOLD_BANNER_TEXT = "SOLD!";
+
+/**
+ * text_gdiplus_v3 treatment for the item/price lower third.
+ * 72px Arial Black, white fill, 8px black outline, 70% black backing,
+ * 1000×320 extents — sits in the bottom ~400px of the 1080×1920 canvas
+ * so it stays readable on a phone over a busy card mat.
+ * Colors are Windows COLORREF (0x00BBGGRR); white/black are palindromes.
+ */
+export const ITEM_BAR_TEXT_SETTINGS: Record<string, unknown> = {
+  text: "",
+  font: { face: "Arial Black", size: 72, flags: 1, style: "Bold" },
+  color: 0xffffff,
+  outline: true,
+  outline_size: 8,
+  outline_color: 0x000000,
+  bk_color: 0x000000,
+  bk_opacity: 70,
+  align: "center",
+  valign: "center",
+  extents: true,
+  extents_cx: 1000,
+  extents_cy: 320,
+};
+
+/**
+ * Separate, louder SOLD source — 160px gold (#FFC828 as COLORREF 0x0028C8FF),
+ * 16px black outline, 80% backing, mid-canvas so it cannot be missed.
+ * Static text; runtime only toggles the scene item.
+ */
+export const SOLD_BANNER_TEXT_SETTINGS: Record<string, unknown> = {
+  text: SOLD_BANNER_TEXT,
+  font: { face: "Arial Black", size: 160, flags: 1, style: "Bold" },
+  color: 0x0028c8ff,
+  outline: true,
+  outline_size: 16,
+  outline_color: 0x000000,
+  bk_color: 0x000000,
+  bk_opacity: 80,
+  align: "center",
+  valign: "center",
+  extents: true,
+  extents_cx: 1000,
+  extents_cy: 400,
+};
+
+export const ITEM_BAR_TRANSFORM: Transform = {
+  positionX: 40,
+  positionY: 1520,
+  scaleX: 1,
+  scaleY: 1,
+  cropLeft: 0,
+  cropRight: 0,
+  cropTop: 0,
+  cropBottom: 0,
+};
+
+export const SOLD_BANNER_TRANSFORM: Transform = {
+  positionX: 40,
+  positionY: 720,
+  scaleX: 1,
+  scaleY: 1,
+  cropLeft: 0,
+  cropRight: 0,
+  cropTop: 0,
+  cropBottom: 0,
+};
+
+function identityTransform(): Transform {
+  return {
+    positionX: 0,
+    positionY: 0,
+    scaleX: 1,
+    scaleY: 1,
+    cropLeft: 0,
+    cropRight: 0,
+    cropTop: 0,
+    cropBottom: 0,
+  };
+}
+
+/** Overlays created disabled so a fresh setup shows nothing until the seller puts something up. */
+function cameraFacingOverlays(): DesiredSceneItem[] {
+  return [
+    {
+      sourceName: ITEM_BAR_SOURCE,
+      sourceKind: TEXT_SOURCE_KIND,
+      inputSettings: ITEM_BAR_TEXT_SETTINGS,
+      transform: ITEM_BAR_TRANSFORM,
+      enabled: false,
+    },
+    {
+      sourceName: SOLD_BANNER_SOURCE,
+      sourceKind: TEXT_SOURCE_KIND,
+      inputSettings: SOLD_BANNER_TEXT_SETTINGS,
+      transform: SOLD_BANNER_TRANSFORM,
+      enabled: false,
+    },
+  ];
+}
+
 /** Build the desired four-scene model from a ShowConfig. Pure — no OBS. */
 export function buildDesiredScenes(config: ShowConfig): DesiredScene[] {
   const cameraName = config.camera?.label ?? "Camera";
   const tableName = config.captureCard?.label ?? cameraName;
 
   const full = fullCanvasFillTransform();
+  const overlays = cameraFacingOverlays();
 
   const meScene: DesiredScene = {
     sceneName: "ME",
@@ -154,6 +261,7 @@ export function buildDesiredScenes(config: ShowConfig): DesiredScene[] {
         transform: full,
         enabled: true,
       },
+      ...overlays,
     ],
   };
 
@@ -171,11 +279,12 @@ export function buildDesiredScenes(config: ShowConfig): DesiredScene[] {
         transform: full,
         enabled: true,
       },
+      ...overlays,
     ],
   };
 
   // BOTH: table fills the canvas as background, me sits in a small inset
-  // bottom-right, padded 24px off both edges.
+  // bottom-right, padded 24px off both edges. Overlays sit on top.
   const insetW = Math.round(CANVAS_WIDTH * 0.32);
   const insetTileH = Math.round(insetW * (16 / 9)); // portrait inset tile, matches canvas orientation
   const pad = 24;
@@ -199,6 +308,7 @@ export function buildDesiredScenes(config: ShowConfig): DesiredScene[] {
         ),
         enabled: true,
       },
+      ...overlays,
     ],
   };
 
@@ -209,16 +319,7 @@ export function buildDesiredScenes(config: ShowConfig): DesiredScene[] {
         sourceName: BREAK_CARD_SOURCE,
         sourceKind: BREAK_CARD_KIND,
         inputSettings: { text: "BE RIGHT BACK" },
-        transform: {
-          positionX: 0,
-          positionY: 0,
-          scaleX: 1,
-          scaleY: 1,
-          cropLeft: 0,
-          cropRight: 0,
-          cropTop: 0,
-          cropBottom: 0,
-        },
+        transform: identityTransform(),
         enabled: true,
       },
     ],

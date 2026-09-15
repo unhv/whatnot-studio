@@ -2,11 +2,20 @@ import { describe, it, expect } from "vitest";
 import {
   applyOpsToState,
   buildDesiredScenes,
+  CAMERA_FACING_SCENES,
   compileScenePlan,
   EMPTY_OBS_STATE,
   fullCanvasFillTransform,
+  ITEM_BAR_SOURCE,
+  ITEM_BAR_TEXT_SETTINGS,
+  ITEM_BAR_TRANSFORM,
+  SOLD_BANNER_SOURCE,
+  SOLD_BANNER_TEXT,
+  SOLD_BANNER_TEXT_SETTINGS,
+  SOLD_BANNER_TRANSFORM,
+  TEXT_SOURCE_KIND,
 } from "../src/obs/sceneCompiler.js";
-import type { ShowConfig } from "../src/shared/types.js";
+import { CANVAS_HEIGHT, type ShowConfig } from "../src/shared/types.js";
 
 const config: ShowConfig = {
   showName: "Test Show",
@@ -146,7 +155,7 @@ describe("buildDesiredScenes", () => {
   it("BOTH scene contains both the table (background) and camera (inset) items", () => {
     const desired = buildDesiredScenes(config);
     const both = desired.find((s) => s.sceneName === "BOTH")!;
-    expect(both.items.map((i) => i.sourceName).sort()).toEqual(["Capture Card", "Webcam"].sort());
+    expect(both.items.map((i) => i.sourceName).slice(0, 2).sort()).toEqual(["Capture Card", "Webcam"].sort());
   });
 
   it("falls back to the camera as the TABLE source when no capture card is chosen", () => {
@@ -160,5 +169,54 @@ describe("buildDesiredScenes", () => {
     const brk = desired.find((s) => s.sceneName === "BREAK")!;
     expect(brk.items.length).toBe(1);
     expect(brk.items[0].sourceName).toBe("BREAK Card");
+    expect(brk.items.some((i) => i.sourceName === ITEM_BAR_SOURCE)).toBe(false);
+    expect(brk.items.some((i) => i.sourceName === SOLD_BANNER_SOURCE)).toBe(false);
+  });
+
+  it("puts a disabled Item Bar and SOLD Banner on every camera-facing scene, same names", () => {
+    const desired = buildDesiredScenes(config);
+    for (const sceneName of CAMERA_FACING_SCENES) {
+      const scene = desired.find((s) => s.sceneName === sceneName)!;
+      const itemBar = scene.items.find((i) => i.sourceName === ITEM_BAR_SOURCE);
+      const sold = scene.items.find((i) => i.sourceName === SOLD_BANNER_SOURCE);
+      expect(itemBar).toMatchObject({
+        sourceKind: TEXT_SOURCE_KIND,
+        enabled: false,
+        transform: ITEM_BAR_TRANSFORM,
+        inputSettings: ITEM_BAR_TEXT_SETTINGS,
+      });
+      expect(sold).toMatchObject({
+        sourceKind: TEXT_SOURCE_KIND,
+        enabled: false,
+        transform: SOLD_BANNER_TRANSFORM,
+        inputSettings: SOLD_BANNER_TEXT_SETTINGS,
+      });
+      expect(sold?.inputSettings?.text).toBe(SOLD_BANNER_TEXT);
+    }
+  });
+
+  it("places the item bar in the bottom third and the SOLD banner above it", () => {
+    expect(ITEM_BAR_TRANSFORM.positionY).toBeGreaterThanOrEqual((CANVAS_HEIGHT * 2) / 3);
+    expect(SOLD_BANNER_TRANSFORM.positionY).toBeLessThan(ITEM_BAR_TRANSFORM.positionY);
+    expect(ITEM_BAR_TEXT_SETTINGS.outline).toBe(true);
+    expect(ITEM_BAR_TEXT_SETTINGS.bk_opacity).toBeGreaterThan(0);
+    expect(SOLD_BANNER_TEXT_SETTINGS.outline).toBe(true);
+    expect((SOLD_BANNER_TEXT_SETTINGS.font as { size: number }).size).toBeGreaterThan(
+      (ITEM_BAR_TEXT_SETTINGS.font as { size: number }).size
+    );
+  });
+
+  it("creates each overlay input once and leaves it disabled after a full compile", () => {
+    const desired = buildDesiredScenes(config);
+    const ops = compileScenePlan(desired, EMPTY_OBS_STATE);
+    for (const name of [ITEM_BAR_SOURCE, SOLD_BANNER_SOURCE]) {
+      expect(ops.filter((o) => o.type === "CreateInput" && o.inputName === name)).toHaveLength(1);
+    }
+    const after = applyOpsToState(EMPTY_OBS_STATE, ops);
+    for (const sceneName of CAMERA_FACING_SCENES) {
+      const scene = after.scenes.find((s) => s.name === sceneName)!;
+      expect(scene.items.find((i) => i.sourceName === ITEM_BAR_SOURCE)?.enabled).toBe(false);
+      expect(scene.items.find((i) => i.sourceName === SOLD_BANNER_SOURCE)?.enabled).toBe(false);
+    }
   });
 });

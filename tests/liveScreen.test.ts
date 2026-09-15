@@ -13,6 +13,7 @@ import {
   returnToSetup,
   startLiveScreenSession,
 } from "../src/renderer/liveScreenSession.js";
+import { ITEM_BAR_SOURCE, SOLD_BANNER_SOURCE } from "../src/obs/sceneCompiler.js";
 
 function event(outputState: string, outputActive: boolean): StreamStateChangedEvent {
   return { outputActive, outputState };
@@ -154,5 +155,122 @@ describe("LiveScreen session — studio socket drop", () => {
     expect(canReturnToSetup(useAppStore.getState().live)).toBe(false);
     returnToSetup();
     expect(useAppStore.getState().screen).toBe("live");
+  });
+
+  it("applies the scene plan once on first connect, not again on reconnect", async () => {
+    const applied: number[] = [];
+    const client = new FakeObsClient();
+    const session = startLiveScreenSession({
+      client,
+      url: "ws://127.0.0.1:4455",
+      password: "",
+      applyScenes: async () => {
+        applied.push(Date.now());
+      },
+    });
+    await waitUntil(() => useAppStore.getState().connectionStatus === "connected");
+    expect(applied).toHaveLength(1);
+
+    client.emit("ConnectionClosed");
+    session.retryNow();
+    await waitUntil(
+      () =>
+        useAppStore.getState().connectionStatus === "connected" &&
+        useAppStore.getState().live.socketDisconnected === false
+    );
+    expect(applied).toHaveLength(1);
+    session.stop();
+  });
+
+  it("creates the Item Bar and SOLD Banner inputs on first connect against a skeleton collection", async () => {
+    const scenes = new Map<string, { sourceName: string; sceneItemId: number }[]>();
+    scenes.set("Scene", []);
+    const inputs: { inputName: string; inputKind: string }[] = [];
+    let nextId = 1;
+
+    const client = new FakeObsClient({
+      GetSceneList: () => ({ scenes: [...scenes.keys()].map((sceneName) => ({ sceneName })) }),
+      GetInputList: () => ({ inputs: [...inputs] }),
+      GetSceneItemList: (data?: Record<string, unknown>) => ({
+        sceneItems: (scenes.get(String(data?.sceneName)) ?? []).map((i) => ({
+          sourceName: i.sourceName,
+          sceneItemId: i.sceneItemId,
+          sceneItemEnabled: false,
+        })),
+      }),
+      CreateScene: (data?: Record<string, unknown>) => {
+        const name = String(data?.sceneName);
+        if (!scenes.has(name)) scenes.set(name, []);
+        return {};
+      },
+      CreateInput: (data?: Record<string, unknown>) => {
+        const inputName = String(data?.inputName);
+        const sceneName = String(data?.sceneName);
+        inputs.push({ inputName, inputKind: String(data?.inputKind) });
+        const list = scenes.get(sceneName) ?? [];
+        list.push({ sourceName: inputName, sceneItemId: nextId++ });
+        scenes.set(sceneName, list);
+        return {};
+      },
+      CreateSceneItem: (data?: Record<string, unknown>) => {
+        const sceneName = String(data?.sceneName);
+        const sourceName = String(data?.sourceName);
+        const list = scenes.get(sceneName) ?? [];
+        list.push({ sourceName, sceneItemId: nextId++ });
+        scenes.set(sceneName, list);
+        return {};
+      },
+      SetSceneItemTransform: {},
+      SetSceneItemEnabled: {},
+    });
+
+    const session = startLiveScreenSession({
+      client,
+      url: "ws://127.0.0.1:4455",
+      password: "",
+    });
+    await waitUntil(() => useAppStore.getState().connectionStatus === "connected");
+
+    const created = client.calls
+      .filter((c) => c.requestType === "CreateInput")
+      .map((c) => c.requestData?.inputName);
+    expect(created).toContain(ITEM_BAR_SOURCE);
+    expect(created).toContain(SOLD_BANNER_SOURCE);
+    expect(created.filter((n) => n === ITEM_BAR_SOURCE)).toHaveLength(1);
+    expect(created.filter((n) => n === SOLD_BANNER_SOURCE)).toHaveLength(1);
+
+    const overlayEnables = client.calls.filter(
+      (c) =>
+        c.requestType === "SetSceneItemEnabled" &&
+        (c.requestData?.sceneItemEnabled === false || c.requestData?.sceneItemEnabled === true)
+    );
+    expect(overlayEnables.length).toBeGreaterThan(0);
+    session.stop();
+  });
+
+  it("retries the scene plan on the next connect if the first apply throws", async () => {
+    let attempts = 0;
+    const client = new FakeObsClient();
+    const session = startLiveScreenSession({
+      client,
+      url: "ws://127.0.0.1:4455",
+      password: "",
+      applyScenes: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("obs not ready");
+      },
+    });
+    await waitUntil(() => useAppStore.getState().connectionStatus === "connected");
+    expect(attempts).toBe(1);
+
+    client.emit("ConnectionClosed");
+    session.retryNow();
+    await waitUntil(
+      () =>
+        useAppStore.getState().connectionStatus === "connected" &&
+        useAppStore.getState().live.socketDisconnected === false
+    );
+    expect(attempts).toBe(2);
+    session.stop();
   });
 });

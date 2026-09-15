@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useAppStore } from "../state/store.js";
+import { ItemBarObsSync, setItemBarObsSync, useAppStore } from "../state/store.js";
 import { elapsedMs, liveScreenCopy } from "../obs/liveMode.js";
 import { RealObsClient } from "../obs/client.js";
 import { formatElapsed, formatPrice } from "../shared/format.js";
@@ -29,11 +29,21 @@ export default function LiveScreen() {
   const [now, setNow] = useState(() => Date.now());
   const retryNowRef = useRef<() => void>(() => {});
 
-  // First-run's ObsClient is discarded after setup; this is the session
-  // listener that actually folds StreamStateChanged / ConnectionClosed
-  // into the store so RECONNECTING and a socket drop reach the seller.
+  // First-run's ObsClient is discarded after setup; this session is what
+  // applies the four-scene plan (Item Bar / SOLD Banner) on first connect,
+  // then folds StreamStateChanged / ConnectionClosed into the store.
   useEffect(() => {
     const client = new RealObsClient();
+    const sync = new ItemBarObsSync({
+      getClient: () => client,
+      isConnected: () => useAppStore.getState().connectionStatus === "connected",
+    });
+    setItemBarObsSync(sync);
+    const unsub = useAppStore.subscribe((state, prev) => {
+      if (prev.connectionStatus !== "connected" && state.connectionStatus === "connected") {
+        sync.resync(state.itemBar);
+      }
+    });
     const session = startLiveScreenSession({
       client,
       url: `ws://127.0.0.1:${obsPort}`,
@@ -42,6 +52,9 @@ export default function LiveScreen() {
     retryNowRef.current = () => session.retryNow();
     return () => {
       retryNowRef.current = () => {};
+      unsub();
+      setItemBarObsSync(null);
+      sync.dispose();
       session.stop();
     };
   }, [obsPort, obsPassword]);
@@ -149,7 +162,11 @@ export default function LiveScreen() {
             className="flex-1 rounded-md bg-neutral-950 px-3 py-3 text-base outline-none ring-1 ring-neutral-800 focus:ring-neutral-500"
             placeholder="What's on the table"
             value={itemDraft}
-            onChange={(e) => setItemDraft(e.target.value)}
+            onChange={(e) => {
+              const value = e.target.value;
+              setItemDraft(value);
+              dispatchItemBar({ type: "SET_ITEM", item: value, price: formatPrice(priceDraft) });
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") showItem();
             }}
@@ -158,7 +175,11 @@ export default function LiveScreen() {
             className="w-24 rounded-md bg-neutral-950 px-3 py-3 text-base outline-none ring-1 ring-neutral-800 focus:ring-neutral-500"
             placeholder="Price"
             value={priceDraft}
-            onChange={(e) => setPriceDraft(e.target.value)}
+            onChange={(e) => {
+              const value = e.target.value;
+              setPriceDraft(value);
+              dispatchItemBar({ type: "SET_ITEM", item: itemDraft, price: formatPrice(value) });
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") showItem();
             }}

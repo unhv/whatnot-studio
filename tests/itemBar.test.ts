@@ -34,6 +34,14 @@ describe("itemBarReducer", () => {
     expect(deriveLowerThirdText(state)).toBe("SOLD — Mug — $12");
   });
 
+  it("SOLD keeps the item onCanvas so a separate SOLD source can sit on top of the item bar", () => {
+    let state = itemBarReducer(initialItemBarState(), { type: "SET_ITEM", item: "Mug", price: "$12" });
+    state = itemBarReducer(state, { type: "SOLD", now: 1000 });
+    expect(state.onCanvas).toBe(true);
+    expect(state.soldUntil).toBe(1000 + SOLD_BANNER_MS);
+    expect(isOnCanvas(state)).toBe(true);
+  });
+
   it("TICK auto-clears once soldUntil has passed", () => {
     let state = itemBarReducer(initialItemBarState(), { type: "SET_ITEM", item: "Mug", price: "$12" });
     state = itemBarReducer(state, { type: "SOLD", now: 1000 });
