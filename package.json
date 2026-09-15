@@ -1,6 +1,6 @@
 {
   "name": "whatnot-studio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A single-window Electron app that owns OBS picture/sound over obs-websocket for a Whatnot seller, while Whatnot's own Show Tools page owns Go Live.",
   "type": "module",
