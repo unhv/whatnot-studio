@@ -351,16 +351,61 @@ export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<Encod
   };
 }
 
+export interface FirstRunLaunchResult {
+  pid: number;
+  /** True when we did not spawn — the seller's OBS is already on this port. */
+  reused?: boolean;
+}
+
 export interface FirstRunDeps {
   paths: FirstRunPaths;
   fs: FirstRunFs;
   /** Launch OBS on the freshly-written profile/collection. */
-  launch(): Promise<{ pid: number }>;
+  launch(): Promise<FirstRunLaunchResult>;
   /** Connect a fresh ObsClient to the just-launched (or just-restarted) OBS. */
   connect(): Promise<ObsClient>;
   /** Gracefully close OBS at this pid (never force-kill — see FINDINGS.md). */
   closeObs(pid: number): Promise<void>;
   profileName?: string;
+  /** Setup already has a live websocket. Skip spawn, close, and disk profile writes. */
+  alreadyRunning?: boolean;
+}
+
+/**
+ * Put the live OBS session onto `expectedName`. Used when we reused an
+ * already-running instance (it is almost certainly still on Untitled).
+ * Create* only when the name is missing from OBS's list — writing the
+ * profile folder ourselves while OBS is up races CreateProfile.
+ */
+export async function switchToProfileAndCollection(
+  obs: ObsClient,
+  expectedName: string
+): Promise<void> {
+  const profileList = await obs.call<ProfileListResult>("GetProfileList");
+  if (profileList.currentProfileName !== expectedName) {
+    if (profileList.profiles.includes(expectedName)) {
+      await obs.call("SetCurrentProfile", { profileName: expectedName });
+    } else {
+      try {
+        await obs.call("CreateProfile", { profileName: expectedName });
+      } catch {
+        await obs.call("SetCurrentProfile", { profileName: expectedName });
+      }
+    }
+  }
+
+  const collectionList = await obs.call<SceneCollectionListResult>("GetSceneCollectionList");
+  if (collectionList.currentSceneCollectionName !== expectedName) {
+    if (collectionList.sceneCollections.includes(expectedName)) {
+      await obs.call("SetCurrentSceneCollection", { sceneCollectionName: expectedName });
+    } else {
+      try {
+        await obs.call("CreateSceneCollection", { sceneCollectionName: expectedName });
+      } catch {
+        await obs.call("SetCurrentSceneCollection", { sceneCollectionName: expectedName });
+      }
+    }
+  }
 }
 
 /**
@@ -370,24 +415,33 @@ export interface FirstRunDeps {
  */
 export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResult> {
   const profileName = deps.profileName ?? PROFILE_NAME;
-
-  await deps.fs.mkdir(deps.fs.dirname(deps.paths.profileIniPath));
-  await deps.fs.writeFile(deps.paths.profileIniPath, buildFirstRunProfileIni(profileName));
-
-  await deps.fs.mkdir(deps.fs.dirname(deps.paths.sceneCollectionJsonPath));
-  await deps.fs.writeFile(
-    deps.paths.sceneCollectionJsonPath,
-    JSON.stringify(buildSceneCollectionSkeleton(profileName), null, 2)
-  );
+  const alreadyRunning = deps.alreadyRunning === true;
 
   const encoderJsonPath =
     deps.paths.streamEncoderJsonPath ?? streamEncoderJsonPathFromProfileIni(deps.paths.profileIniPath);
   const encoderJson = JSON.stringify(buildWhatnotStreamEncoderJson());
   await deps.fs.mkdir(deps.fs.dirname(encoderJsonPath));
-  await deps.fs.writeFile(encoderJsonPath, encoderJson);
 
-  const { pid } = await deps.launch();
+  if (!alreadyRunning) {
+    await deps.fs.mkdir(deps.fs.dirname(deps.paths.profileIniPath));
+    await deps.fs.writeFile(deps.paths.profileIniPath, buildFirstRunProfileIni(profileName));
+
+    await deps.fs.mkdir(deps.fs.dirname(deps.paths.sceneCollectionJsonPath));
+    await deps.fs.writeFile(
+      deps.paths.sceneCollectionJsonPath,
+      JSON.stringify(buildSceneCollectionSkeleton(profileName), null, 2)
+    );
+    await deps.fs.writeFile(encoderJsonPath, encoderJson);
+  }
+
+  const launched = alreadyRunning ? { pid: 0, reused: true } : await deps.launch();
+  const pid = launched.pid;
+  const reused = alreadyRunning || launched.reused === true;
   const obs = await deps.connect();
+
+  if (reused) {
+    await switchToProfileAndCollection(obs, profileName);
+  }
 
   const profileList = await obs.call<ProfileListResult>("GetProfileList");
   const collectionList = await obs.call<SceneCollectionListResult>("GetSceneCollectionList");
@@ -411,6 +465,13 @@ export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResu
   });
   const { encoderWarning } = await applyWhatnotEncoderSettings(obs);
   await obs.disconnect();
+
+  if (reused) {
+    // We do not own this OBS process. Close+relaunch would spawn a second
+    // obs64 onto the same port; SetVideoSettings already applied live.
+    await deps.fs.writeFile(encoderJsonPath, encoderJson);
+    return { ok: true, pid, versionWarning, encoderWarning };
+  }
 
   // The canvas setting only takes effect for Whatnot's health check after a
   // full restart (FINDINGS.md check 3) — this is a one-time cost.

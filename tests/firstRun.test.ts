@@ -8,6 +8,7 @@ import {
   keyintForIntervalSec,
   runFirstRunSetup,
   streamEncoderJsonPathFromProfileIni,
+  switchToProfileAndCollection,
   verifyProfileAndCollection,
   type FirstRunDeps,
   type ProfileListResult,
@@ -557,5 +558,149 @@ describe("runFirstRunSetup", () => {
     expect(launch).toHaveBeenCalledTimes(1); // only the initial launch — no restart attempted
     expect(closeObs).not.toHaveBeenCalled();
     expect(client.calls.some((c) => c.requestType === "SetVideoSettings")).toBe(false);
+  });
+
+  it("reuses an already-running OBS, switches onto Whatnot Studio, and does not close it", async () => {
+    let currentProfileName = "Untitled";
+    let profiles = ["Untitled"];
+    let currentSceneCollectionName = "Untitled";
+    let sceneCollections = ["Untitled"];
+
+    const { fs, written } = fakeFs();
+    const closeObs = vi.fn(async () => {});
+    const launch = vi.fn(async () => ({ pid: 99, reused: true }));
+
+    const client = new FakeObsClient({
+      GetProfileList: () => ({ profiles: [...profiles], currentProfileName }),
+      GetSceneCollectionList: () => ({
+        sceneCollections: [...sceneCollections],
+        currentSceneCollectionName,
+      }),
+      CreateProfile: (data?: Record<string, unknown>) => {
+        currentProfileName = String(data?.profileName);
+        if (!profiles.includes(currentProfileName)) profiles = [...profiles, currentProfileName];
+        return {};
+      },
+      CreateSceneCollection: (data?: Record<string, unknown>) => {
+        currentSceneCollectionName = String(data?.sceneCollectionName);
+        if (!sceneCollections.includes(currentSceneCollectionName)) {
+          sceneCollections = [...sceneCollections, currentSceneCollectionName];
+        }
+        return {};
+      },
+      GetVersion: { obsVersion: "31.1.2" },
+      SetVideoSettings: {},
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ encoder: "nvenc" }),
+      GetVideoSettings: videoSettings(),
+    });
+    const connect = vi.fn(async () => client);
+
+    const deps: FirstRunDeps = {
+      paths: {
+        profileIniPath: "C:/appdata/profiles/Whatnot Studio/basic.ini",
+        sceneCollectionJsonPath: "C:/appdata/scene_collections/Whatnot Studio.json",
+      },
+      fs,
+      launch,
+      connect,
+      closeObs,
+      alreadyRunning: true,
+    };
+
+    const result = await runFirstRunSetup(deps);
+
+    expect(result.ok).toBe(true);
+    expect(launch).not.toHaveBeenCalled();
+    expect(closeObs).not.toHaveBeenCalled();
+    expect(client.calls.some((c) => c.requestType === "CreateProfile")).toBe(true);
+    expect(client.calls.some((c) => c.requestType === "CreateSceneCollection")).toBe(true);
+    expect(client.calls.some((c) => c.requestType === "SetVideoSettings")).toBe(true);
+    expect(written["C:/appdata/profiles/Whatnot Studio/basic.ini"]).toBeUndefined();
+    expect(JSON.parse(written["C:/appdata/profiles/Whatnot Studio/streamEncoder.json"])).toEqual(
+      buildWhatnotStreamEncoderJson()
+    );
+  });
+
+  it("does not close or relaunch when launch() reports the port was already taken", async () => {
+    let currentProfileName = "Untitled";
+    let profiles = ["Untitled"];
+    let currentSceneCollectionName = "Untitled";
+    let sceneCollections = ["Untitled"];
+
+    const { fs } = fakeFs();
+    const closeObs = vi.fn(async () => {});
+    const launch = vi.fn(async () => ({ pid: 0, reused: true }));
+
+    const client = new FakeObsClient({
+      GetProfileList: () => ({ profiles: [...profiles], currentProfileName }),
+      GetSceneCollectionList: () => ({
+        sceneCollections: [...sceneCollections],
+        currentSceneCollectionName,
+      }),
+      CreateProfile: (data?: Record<string, unknown>) => {
+        currentProfileName = String(data?.profileName);
+        if (!profiles.includes(currentProfileName)) profiles = [...profiles, currentProfileName];
+        return {};
+      },
+      CreateSceneCollection: (data?: Record<string, unknown>) => {
+        currentSceneCollectionName = String(data?.sceneCollectionName);
+        if (!sceneCollections.includes(currentSceneCollectionName)) {
+          sceneCollections = [...sceneCollections, currentSceneCollectionName];
+        }
+        return {};
+      },
+      GetVersion: { obsVersion: "31.1.2" },
+      SetVideoSettings: {},
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ encoder: "nvenc" }),
+      GetVideoSettings: videoSettings(),
+    });
+
+    const result = await runFirstRunSetup({
+      paths: {
+        profileIniPath: "C:/appdata/profiles/Whatnot Studio/basic.ini",
+        sceneCollectionJsonPath: "C:/appdata/scene_collections/Whatnot Studio.json",
+      },
+      fs,
+      launch,
+      connect: async () => client,
+      closeObs,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(closeObs).not.toHaveBeenCalled();
+  });
+
+  it("SetCurrentProfile when Whatnot Studio already exists on the running OBS", async () => {
+    let currentProfileName = "Untitled";
+    let currentSceneCollectionName = "Untitled";
+    const client = new FakeObsClient({
+      GetProfileList: () => ({
+        profiles: ["Untitled", "Whatnot Studio"],
+        currentProfileName,
+      }),
+      GetSceneCollectionList: () => ({
+        sceneCollections: ["Untitled", "Whatnot Studio"],
+        currentSceneCollectionName,
+      }),
+      SetCurrentProfile: (data?: Record<string, unknown>) => {
+        currentProfileName = String(data?.profileName);
+        return {};
+      },
+      SetCurrentSceneCollection: (data?: Record<string, unknown>) => {
+        currentSceneCollectionName = String(data?.sceneCollectionName);
+        return {};
+      },
+    });
+
+    await switchToProfileAndCollection(client, "Whatnot Studio");
+    const afterProfiles = await client.call<ProfileListResult>("GetProfileList");
+    const afterCollections = await client.call<SceneCollectionListResult>("GetSceneCollectionList");
+    expect(afterProfiles.currentProfileName).toBe("Whatnot Studio");
+    expect(afterCollections.currentSceneCollectionName).toBe("Whatnot Studio");
+    expect(client.calls.some((c) => c.requestType === "CreateProfile")).toBe(false);
+    expect(client.calls.some((c) => c.requestType === "CreateSceneCollection")).toBe(false);
   });
 });

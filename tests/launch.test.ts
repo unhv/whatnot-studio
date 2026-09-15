@@ -25,8 +25,26 @@ describe("launchObsForProductAsync", () => {
     // override values, never flip that switch -- without this call the
     // websocket never opens on a real machine, silently.
     const { launchObsForProductAsync } = await import("../src/obs/launch.js");
-    const result = await launchObsForProductAsync({ port: 4455, password: "x" });
+    const result = await launchObsForProductAsync(
+      { port: 4455, password: "x" },
+      { isPortOpen: async () => false }
+    );
     expect(ensureWebsocketServerEnabled).toHaveBeenCalledTimes(1);
     expect(result.pid).toBe(4242);
+    expect(result.reused).toBe(false);
+  });
+
+  it("does not spawn a second obs64 when the websocket port is already listening", async () => {
+    const { spawn } = await import("node:child_process");
+    const spawnMock = spawn as unknown as ReturnType<typeof vi.fn>;
+    spawnMock.mockClear();
+    const { launchObsForProductAsync } = await import("../src/obs/launch.js");
+    const result = await launchObsForProductAsync(
+      { port: 4455, password: "x" },
+      { isPortOpen: async () => true }
+    );
+    expect(result).toEqual({ pid: 0, reused: true });
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(ensureWebsocketServerEnabled).not.toHaveBeenCalled();
   });
 });

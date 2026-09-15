@@ -81,8 +81,9 @@ describe("setup screen — (optional) is not duplicated", () => {
     expect(src).not.toMatch(/Capture card \(optional\)"[\s\S]*optional/);
     expect(src).not.toContain("No devices detected");
     expect(src).toContain("setupDeviceBanner");
-    expect(src).toContain("startSetupDeviceSession");
+    expect(src).toContain("startObsSetupSession");
     expect(src).toContain("SETUP_TRY_AGAIN");
     expect(src).toContain("retryRef.current");
+    expect(src).toMatch(/obsAlreadyRunning:\s*deviceEnum\.connected/);
   });
 });

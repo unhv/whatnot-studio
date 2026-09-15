@@ -62,9 +62,16 @@ export const DEFAULT_SHOW_CONFIG: ShowConfig = {
   camera: null,
   mic: null,
   captureCard: null,
+  // Filled at runtime from OBS's own websocket config. Memory only —
+  // persistableShowConfig blanks this so it is never written as plain JSON.
   obsPassword: "",
   obsPort: 4455,
 };
+
+/** Drop the OBS websocket password before any disk/JSON snapshot. */
+export function persistableShowConfig(config: ShowConfig): ShowConfig {
+  return { ...config, obsPassword: "" };
+}
 
 /** ~one beat. Fast enough to feel live, slow enough not to hammer the socket per keystroke. */
 export const ITEM_BAR_OBS_DEBOUNCE_MS = 200;

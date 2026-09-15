@@ -34,7 +34,10 @@ export interface FirstRunBridge {
     streamEncoderJsonPath?: string;
     streamEncoderJson?: string;
   }): Promise<void>;
-  launchObs(opts: { port: number; password: string; profileName?: string }): Promise<{ pid: number }>;
+  launchObs(opts: { port: number; password: string; profileName?: string }): Promise<{
+    pid: number;
+    reused?: boolean;
+  }>;
   closeObs(pid: number): Promise<void>;
 }
 
@@ -90,6 +93,8 @@ export interface RunAppFirstRunOptions {
   port: number;
   password: string;
   profileName?: string;
+  /** Setup already enumerated devices over a live websocket. Do not spawn. */
+  obsAlreadyRunning?: boolean;
   /** Constructs a fresh ObsClient each time OBS is (re)connected to. Real
    * callers pass `() => new RealObsClient()`; tests pass a fake factory. */
   makeObsClient(): ObsClient;
@@ -105,7 +110,11 @@ export async function runAppFirstRun(opts: RunAppFirstRunOptions): Promise<First
     paths,
     fs,
     profileName,
-    launch: () => opts.bridge.launchObs({ port: opts.port, password: opts.password, profileName }),
+    alreadyRunning: opts.obsAlreadyRunning === true,
+    launch: async () => {
+      if (opts.obsAlreadyRunning) return { pid: 0, reused: true };
+      return opts.bridge.launchObs({ port: opts.port, password: opts.password, profileName });
+    },
     connect: async () => {
       const client = opts.makeObsClient();
       await client.connect(`ws://127.0.0.1:${opts.port}`, opts.password);

@@ -2,15 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../state/store.js";
 import {
   deviceDropdownPlaceholder,
+  deviceEnumFromAttempt,
   deviceFieldLabel,
   selectDeviceChoice,
   setupDeviceBanner,
+  SETUP_COPY_OBS_PASSWORD_HINT,
+  SETUP_SHOW_TOOLS_HINT,
   SETUP_TRY_AGAIN,
 } from "../state/setupDevices.js";
 import type { DeviceChoice } from "../shared/types.js";
 import { runAppFirstRun } from "../obs/runSetup.js";
-import { RealObsClient } from "../obs/client.js";
-import { startSetupDeviceSession } from "../obs/devices.js";
+import { RealObsClient, startObsSetupSession } from "../obs/client.js";
+import type { ObsWebsocketConfig } from "../obs/obsConfig.js";
+import { enumerateStudioDevices } from "../obs/devices.js";
 
 /** Setup screen: this IS the first-run wizard, per the brief — nothing
  * else is built as a separate flow. Three dropdowns, a show name, and a
@@ -27,17 +31,24 @@ export default function SetupScreen() {
 
   useEffect(() => {
     const client = new RealObsClient();
-    const session = startSetupDeviceSession({
+    const session = startObsSetupSession({
       client,
-      url: `ws://127.0.0.1:${showConfig.obsPort}`,
-      password: showConfig.obsPassword,
+      loadConfig: () =>
+        window.whatnotStudio.readObsWebsocketConfig() as Promise<ObsWebsocketConfig>,
+      enumerate: enumerateStudioDevices,
+      onAttempt: (attempt) => {
+        useAppStore.getState().setDeviceEnum(deviceEnumFromAttempt(attempt));
+      },
+      onCredentials: ({ port, password }) => {
+        useAppStore.getState().setShowConfig({ obsPort: port, obsPassword: password });
+      },
     });
     retryRef.current = () => session.retry();
     return () => {
       retryRef.current = () => {};
       session.stop();
     };
-  }, [showConfig.obsPort, showConfig.obsPassword]);
+  }, []);
 
   const canContinue = showConfig.showName.trim() !== "" && showConfig.camera !== null && !starting;
   const banner = setupDeviceBanner(deviceEnum);
@@ -52,6 +63,7 @@ export default function SetupScreen() {
         bridge: window.whatnotStudio,
         port: showConfig.obsPort,
         password: showConfig.obsPassword,
+        obsAlreadyRunning: deviceEnum.connected,
         makeObsClient: () => new RealObsClient(),
       });
       if (!result.ok) {
@@ -141,20 +153,25 @@ export default function SetupScreen() {
         onChange={(id) => pickDevice("captureCard", id)}
       />
 
-      <div className="flex items-center gap-3">
-        <button
-          className="rounded-md bg-neutral-800 px-4 py-3 text-sm hover:bg-neutral-700"
-          onClick={() => void openShowTools()}
-        >
-          Open Whatnot Show Tools
-        </button>
-        <button
-          className="rounded-md bg-neutral-800 px-4 py-3 text-sm hover:bg-neutral-700"
-          onClick={() => void copyPassword()}
-        >
-          Copy OBS password
-        </button>
-        <span className="text-sm text-neutral-500">Paste it into Whatnot's Show Tools page.</span>
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <button
+            className="rounded-md bg-neutral-800 px-4 py-3 text-sm hover:bg-neutral-700"
+            onClick={() => void openShowTools()}
+          >
+            Open Whatnot Show Tools
+          </button>
+          <span className="text-sm text-neutral-500">{SETUP_SHOW_TOOLS_HINT}</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            className="rounded-md bg-neutral-800 px-4 py-3 text-sm hover:bg-neutral-700"
+            onClick={() => void copyPassword()}
+          >
+            Copy OBS password
+          </button>
+          <span className="text-sm text-neutral-500">{SETUP_COPY_OBS_PASSWORD_HINT}</span>
+        </div>
       </div>
 
       {setupError && (

@@ -22,10 +22,15 @@ import { fileURLToPath } from "node:url";
 import { closeObs, launchObsForProductAsync, waitForPort } from "../src/obs/launch.js";
 import { profileDirName, sceneCollectionFileName } from "../src/obs/firstRun.js";
 import { PROFILE_NAME } from "../src/shared/types.js";
+import { errorCodeFromUnknown, obsWebsocketConfigFromRead } from "../src/obs/obsConfig.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const OBS_APPDATA = path.join(os.homedir(), "AppData", "Roaming", "obs-studio");
+const OBS_APPDATA = path.join(
+  process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"),
+  "obs-studio"
+);
+const OBS_WEBSOCKET_CONFIG = path.join(OBS_APPDATA, "plugin_config", "obs-websocket", "config.json");
 
 function firstRunPaths(profileName: string = PROFILE_NAME) {
   const dir = profileDirName(profileName);
@@ -150,9 +155,11 @@ app.whenReady().then(() => {
   );
 
   ipcMain.handle("obs:launch", async (_event, opts: { port: number; password: string; profileName?: string }) => {
-    const { pid } = await launchObsForProductAsync(opts);
-    await waitForPort(opts.port);
-    return { pid };
+    const launched = await launchObsForProductAsync(opts);
+    if (!launched.reused) {
+      await waitForPort(opts.port);
+    }
+    return { pid: launched.pid, reused: launched.reused };
   });
 
   ipcMain.handle("obs:close", async (_event, pid: number) => {
@@ -169,6 +176,17 @@ app.whenReady().then(() => {
 
   ipcMain.handle("clipboard:write", (_event, text: string) => {
     clipboard.writeText(text);
+  });
+
+  // Always re-read from disk. The seller's Try again depends on picking up
+  // a change they just made in OBS's WebSocket Server Settings.
+  ipcMain.handle("obs:websocketConfig", async () => {
+    try {
+      const text = await fs.readFile(OBS_WEBSOCKET_CONFIG, "utf8");
+      return obsWebsocketConfigFromRead({ ok: true, text });
+    } catch (err) {
+      return obsWebsocketConfigFromRead({ ok: false, code: errorCodeFromUnknown(err) });
+    }
   });
 });
 

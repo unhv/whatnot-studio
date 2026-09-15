@@ -6,6 +6,7 @@
  * name and its extra probe-only flags).
  */
 import { spawn } from "node:child_process";
+import * as net from "node:net";
 import {
   OBS_DIR,
   OBS_EXE,
@@ -24,11 +25,43 @@ export interface ProductLaunchOptions {
   profileName?: string;
 }
 
+export interface ProductLaunchResult {
+  pid: number;
+  /** True when 127.0.0.1:port was already accepting connections; nothing was spawned. */
+  reused: boolean;
+}
+
+export interface LaunchProbe {
+  isPortOpen?(port: number): Promise<boolean>;
+}
+
+/** One TCP connect to 127.0.0.1. Used to refuse a second obs64 on the seller's port. */
+export function isPortOpen(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = net.createConnection({ port, host }, () => {
+      sock.end();
+      resolve(true);
+    });
+    sock.on("error", () => {
+      sock.destroy();
+      resolve(false);
+    });
+    sock.setTimeout(timeoutMs, () => {
+      sock.destroy();
+      resolve(false);
+    });
+  });
+}
+
 /**
  * Launch OBS on the "Whatnot Studio" profile/collection, minimized to
  * tray, updater disabled. Deliberately does not pass the OBS CLI flag
  * that would force the stream to start on launch — see src/obs/client.ts's
  * ownership-rule comment; this app never starts the stream itself.
+ *
+ * If the websocket port is already listening, this returns without
+ * spawning — two obs64 processes cannot both own the same port, and
+ * waitForPort would succeed on the instance that is already up.
  *
  * MEASURED 2026-09-15 (FINDINGS.md, supervised run): obs-websocket's
  * persisted plugin_config/obs-websocket/config.json can have
@@ -37,9 +70,17 @@ export interface ProductLaunchOptions {
  * do not flip server_enabled to true. Without this call the websocket never
  * opens and every first run times out waiting for the port, silently.
  */
-export async function launchObsForProductAsync(opts: ProductLaunchOptions): Promise<LaunchResult> {
+export async function launchObsForProductAsync(
+  opts: ProductLaunchOptions,
+  probe: LaunchProbe = {}
+): Promise<ProductLaunchResult> {
+  const portOpen = probe.isPortOpen ?? isPortOpen;
+  if (await portOpen(opts.port)) {
+    return { pid: 0, reused: true };
+  }
   await ensureWebsocketServerEnabled();
-  return launchObsForProduct(opts);
+  const launched = launchObsForProduct(opts);
+  return { pid: launched.pid, reused: false };
 }
 
 export function launchObsForProduct(opts: ProductLaunchOptions): LaunchResult {

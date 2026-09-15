@@ -73,4 +73,47 @@ describe("runAppFirstRun", () => {
     expect(bridge.launchObs).toHaveBeenCalledTimes(1);
     expect(bridge.closeObs).not.toHaveBeenCalled();
   });
+
+  it("does not spawn or close OBS when the setup session is already connected", async () => {
+    const bridge = makeBridge();
+    let currentProfileName = "Untitled";
+    let profiles = ["Untitled"];
+    let currentSceneCollectionName = "Untitled";
+    let sceneCollections = ["Untitled"];
+    const client = new FakeObsClient({
+      GetProfileList: () => ({ profiles: [...profiles], currentProfileName }),
+      GetSceneCollectionList: () => ({
+        sceneCollections: [...sceneCollections],
+        currentSceneCollectionName,
+      }),
+      CreateProfile: (data?: Record<string, unknown>) => {
+        currentProfileName = String(data?.profileName);
+        if (!profiles.includes(currentProfileName)) profiles = [...profiles, currentProfileName];
+        return {};
+      },
+      CreateSceneCollection: (data?: Record<string, unknown>) => {
+        currentSceneCollectionName = String(data?.sceneCollectionName);
+        if (!sceneCollections.includes(currentSceneCollectionName)) {
+          sceneCollections = [...sceneCollections, currentSceneCollectionName];
+        }
+        return {};
+      },
+      GetVersion: { obsVersion: "31.1.2" },
+      SetVideoSettings: {},
+      SetProfileParameter: {},
+      GetProfileParameter: { parameterValue: "nvenc" },
+    });
+
+    const result = await runAppFirstRun({
+      bridge,
+      port: 4455,
+      password: "pw",
+      obsAlreadyRunning: true,
+      makeObsClient: () => client,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(bridge.launchObs).not.toHaveBeenCalled();
+    expect(bridge.closeObs).not.toHaveBeenCalled();
+  });
 });

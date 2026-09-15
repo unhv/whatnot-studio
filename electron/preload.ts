@@ -18,8 +18,10 @@ const api = {
     streamEncoderJson?: string;
   }): Promise<void> => ipcRenderer.invoke("firstRun:writeFiles", args),
 
-  launchObs: (opts: { port: number; password: string; profileName?: string }): Promise<{ pid: number }> =>
-    ipcRenderer.invoke("obs:launch", opts),
+  launchObs: (opts: { port: number; password: string; profileName?: string }): Promise<{
+    pid: number;
+    reused: boolean;
+  }> => ipcRenderer.invoke("obs:launch", opts),
 
   closeObs: (pid: number): Promise<void> => ipcRenderer.invoke("obs:close", pid),
 
@@ -29,6 +31,16 @@ const api = {
   openInChrome: (url: string): Promise<void> => ipcRenderer.invoke("shell:openInChrome", url),
 
   copyToClipboard: (text: string): Promise<void> => ipcRenderer.invoke("clipboard:write", text),
+
+  // Structural result of OBS's own obs-websocket config.json. The password
+  // field is only present when OBS wrote one; never log this return value.
+  readObsWebsocketConfig: (): Promise<{
+    reason: "ok" | "missing-file" | "malformed" | "server-disabled";
+    serverEnabled?: boolean;
+    serverPort?: number;
+    authRequired?: boolean;
+    serverPassword?: string;
+  }> => ipcRenderer.invoke("obs:websocketConfig"),
 
   onHotkey: (callback: (key: "F1" | "F2" | "F3" | "F4" | "F5") => void): (() => void) => {
     const listener = (_event: unknown, key: "F1" | "F2" | "F3" | "F4" | "F5") => callback(key);
