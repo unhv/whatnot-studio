@@ -12,10 +12,25 @@ import {
   returnToSetup,
   startLiveScreenSession,
 } from "./liveScreenSession.js";
-import AudioPanel from "./AudioPanel.js";
+import { liveMicrophoneBanner, MIC_OFF_BANNER } from "../audio/muteHotkey.js";
+import AudioPanel, { useLiveAudioSession } from "./AudioPanel.js";
 import CameraLayoutPanel from "./CameraLayoutPanel.js";
 import TextPlacementControl, { useTextStyleSession } from "./TextPlacementControl.js";
 import ClipsPanel from "./ClipsPanel.js";
+
+export function LiveMicrophoneOffBanner(props: { muted: boolean }) {
+  const banner = liveMicrophoneBanner(props.muted);
+  if (!banner) return null;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="sticky top-0 z-20 rounded-md bg-red-600 px-4 py-5 text-center text-3xl font-black leading-tight text-white ring-4 ring-amber-300"
+    >
+      {MIC_OFF_BANNER}
+    </div>
+  );
+}
 
 const SCENE_HOTKEYS: Record<SceneKey, string> = { ME: "F1", TABLE: "F2", BOTH: "F3", BREAK: "F4" };
 
@@ -33,6 +48,8 @@ export default function LiveScreen() {
   const showConfig = useAppStore((s) => s.showConfig);
   const healthWarning = useAppStore((s) => s.healthWarning);
   const encoderRevertMessage = useAppStore((s) => s.encoderRevertMessage);
+  const micMuted = useAppStore((s) => s.micMuted);
+  const audio = useLiveAudioSession();
   const { state: textStyle, dispatch: dispatchText, syncRef: textSyncRef, stateRef: textStyleRef } =
     useTextStyleSession(showName);
   const dispatchTextRef = useRef(dispatchText);
@@ -161,6 +178,8 @@ export default function LiveScreen() {
         </div>
       </div>
 
+      <LiveMicrophoneOffBanner muted={micMuted} />
+
       {/* 270×480 portrait — the seller drags text here. OBS screenshot
           polling is a later brief; this surface is ours, never OBS. */}
       <TextPlacementControl
@@ -236,7 +255,7 @@ export default function LiveScreen() {
         {selling ? "SOLD!" : "SOLD! (F5)"}
       </button>
 
-      <AudioPanel />
+      <AudioPanel snap={audio.snap} sessionRef={audio.sessionRef} />
 
       <CameraLayoutPanel />
       <ClipsPanel />

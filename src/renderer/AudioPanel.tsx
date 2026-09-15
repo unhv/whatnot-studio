@@ -1,5 +1,16 @@
-import { useEffect, useRef, useState } from "react";
-import { AudioObsClient, startAudioSession, VOICE_INPUT_NAME, DESKTOP_INPUT_NAME } from "../audio/index.js";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import {
+  applyMuteHotkeyToggle,
+  AudioObsClient,
+  DEFAULT_MUTE_ACCELERATOR,
+  DESKTOP_INPUT_NAME,
+  MUTE_ACCELERATOR_CHOICES,
+  MUTE_HOTKEY_FAILED_COPY,
+  muteAcceleratorLabel,
+  startAudioSession,
+  VOICE_INPUT_NAME,
+  type MuteHotkeyStatus,
+} from "../audio/index.js";
 import type { ObsClient } from "../obs/client.js";
 import {
   AUDIO_COPY,
@@ -32,7 +43,12 @@ function LevelMeter(props: { value: number; label: string }) {
   );
 }
 
-export default function AudioPanel(props: { client?: ObsClient }) {
+/** Owns the OBS audio session and the mute hotkey for the lifetime of LIVE,
+ * not the audio settings panel — Clips / layout can unmount that panel. */
+export function useLiveAudioSession(client?: ObsClient): {
+  snap: AudioSnapshot;
+  sessionRef: MutableRefObject<AudioSessionHandle | null>;
+} {
   const showConfig = useAppStore((s) => s.showConfig);
   const setShowConfig = useAppStore((s) => s.setShowConfig);
   const setMicMuted = useAppStore((s) => s.setMicMuted);
@@ -49,9 +65,8 @@ export default function AudioPanel(props: { client?: ObsClient }) {
   useEffect(() => {
     const storage = browserStorage();
     const settings: AudioSettings = seedAudioSettings(loadAudioSettings(storage), showConfig.mic);
-    const client = props.client ?? new AudioObsClient();
     const session = startAudioSession({
-      client,
+      client: client ?? new AudioObsClient(),
       url: `ws://127.0.0.1:${obsPort}`,
       password: obsPassword,
       settings,
@@ -75,7 +90,51 @@ export default function AudioPanel(props: { client?: ObsClient }) {
       session.stop();
     };
     // showConfig.mic is the seed only; the session owns later changes.
-  }, [obsPort, obsPassword, props.client, setMicMuted, setShowConfig]);
+  }, [obsPort, obsPassword, client, setMicMuted, setShowConfig]);
+
+  useEffect(() => {
+    const api = window.whatnotStudio;
+    if (!api || typeof api.onMuteHotkey !== "function") {
+      return;
+    }
+    const unsub = api.onMuteHotkey(() => {
+      const session = sessionRef.current;
+      if (!session) return;
+      void applyMuteHotkeyToggle(session);
+    });
+    return unsub;
+  }, []);
+
+  return { snap, sessionRef };
+}
+
+export default function AudioPanel(props: {
+  snap: AudioSnapshot;
+  sessionRef: MutableRefObject<AudioSessionHandle | null>;
+}) {
+  const setShowConfig = useAppStore((s) => s.setShowConfig);
+  const { snap, sessionRef } = props;
+  const [hotkey, setHotkey] = useState<Pick<MuteHotkeyStatus, "accelerator" | "registered"> & { known: boolean }>({
+    accelerator: DEFAULT_MUTE_ACCELERATOR,
+    registered: true,
+    known: false,
+  });
+
+  useEffect(() => {
+    const api = window.whatnotStudio;
+    if (!api || typeof api.getMuteHotkey !== "function") {
+      return;
+    }
+    let cancelled = false;
+    void api.getMuteHotkey().then((status) => {
+      if (!cancelled) {
+        setHotkey({ accelerator: status.accelerator, registered: status.registered, known: true });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const muted = snap.settings.micMuted;
   const selectedId = snap.settings.micDeviceId ?? "";
@@ -143,13 +202,46 @@ export default function AudioPanel(props: { client?: ObsClient }) {
       </div>
 
       <button
-        className={`flex min-h-20 w-full items-center justify-center rounded-md px-3 text-2xl font-bold ${
+        className={`flex min-h-20 w-full flex-col items-center justify-center rounded-md px-3 text-2xl font-bold ${
           muted ? "bg-red-600 text-white ring-4 ring-red-300" : "bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
         }`}
         onClick={() => void sessionRef.current?.setMuted(!muted)}
       >
-        {muted ? AUDIO_COPY.muted : AUDIO_COPY.mute}
+        <span>{muted ? AUDIO_COPY.muted : AUDIO_COPY.mute}</span>
+        {hotkey.registered ? (
+          <span className="mt-1 text-sm font-semibold opacity-80">{muteAcceleratorLabel(hotkey.accelerator)}</span>
+        ) : null}
       </button>
+
+      <label className="flex flex-col gap-1 text-sm text-neutral-400">
+        <span>Mute shortcut</span>
+        <select
+          className="rounded-md bg-neutral-950 px-3 py-3 text-base text-neutral-100 outline-none ring-1 ring-neutral-800 focus:ring-neutral-500"
+          value={hotkey.accelerator}
+          onChange={(e) => {
+            const accelerator = e.target.value;
+            const api = window.whatnotStudio;
+            if (!api || typeof api.setMuteHotkey !== "function") {
+              setHotkey({ accelerator, registered: false, known: true });
+              return;
+            }
+            void api.setMuteHotkey(accelerator).then((status) => {
+              setHotkey({ accelerator: status.accelerator, registered: status.registered, known: true });
+            });
+          }}
+        >
+          {MUTE_ACCELERATOR_CHOICES.map((choice) => (
+            <option key={choice.accelerator} value={choice.accelerator}>
+              {choice.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {hotkey.known && !hotkey.registered ? (
+        <p className="rounded-md bg-amber-950 px-3 py-2 text-sm text-amber-200 ring-1 ring-amber-800">
+          {MUTE_HOTKEY_FAILED_COPY}
+        </p>
+      ) : null}
 
       <label className="flex items-center gap-3 rounded-md bg-neutral-950 px-3 py-3 text-base">
         <input

@@ -14,7 +14,7 @@
  * See src/obs/client.ts for the full rule.
  */
 import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, shell } from "electron";
-import { promises as fs, readFileSync } from "node:fs";
+import { promises as fs, readFileSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -32,6 +32,11 @@ import {
   writeShowStoreFile,
 } from "./configStore.js";
 import { runUploadProbe } from "./uploadProbe.js";
+import {
+  createMuteHotkeyController,
+  DEFAULT_MUTE_ACCELERATOR,
+  muteHotkeyFromStored,
+} from "../src/audio/muteHotkey.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -96,6 +101,35 @@ async function openInChrome(url: string): Promise<void> {
 
 let mainWindow: BrowserWindow | null = null;
 
+const muteHotkeys = createMuteHotkeyController({
+  register: (accelerator, callback) => globalShortcut.register(accelerator, callback),
+  unregister: (accelerator) => globalShortcut.unregister(accelerator),
+  sendToggle: () => {
+    mainWindow?.webContents.send("mute-hotkey");
+  },
+});
+
+function muteHotkeyFile(): string {
+  return path.join(app.getPath("userData"), "mute-hotkey.json");
+}
+
+function loadMuteAccelerator(): string {
+  try {
+    const raw = JSON.parse(readFileSync(muteHotkeyFile(), "utf8")) as unknown;
+    return muteHotkeyFromStored(raw);
+  } catch {
+    return DEFAULT_MUTE_ACCELERATOR;
+  }
+}
+
+function persistMuteAccelerator(accelerator: string): void {
+  try {
+    writeFileSync(muteHotkeyFile(), JSON.stringify({ accelerator }), "utf8");
+  } catch {
+    // settings still live in memory this session
+  }
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 520,
@@ -109,6 +143,11 @@ function createWindow(): void {
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+
+  mainWindow.on("closed", () => {
+    muteHotkeys.releaseAll();
+    mainWindow = null;
   });
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
@@ -126,6 +165,13 @@ function registerHotkeys(): void {
     globalShortcut.register(key, () => {
       mainWindow?.webContents.send("hotkey", key);
     });
+  }
+  muteHotkeys.set(loadMuteAccelerator());
+}
+
+function unregisterSceneHotkeys(): void {
+  for (const key of HOTKEYS) {
+    globalShortcut.unregister(key);
   }
 }
 
@@ -301,6 +347,18 @@ app.whenReady().then(() => {
 
   ipcMain.handle("quality:probeUpload", async () => runUploadProbe());
 
+  ipcMain.handle("muteHotkey:get", async () => {
+    const status = muteHotkeys.get();
+    return { accelerator: status.accelerator, registered: status.registered };
+  });
+
+  ipcMain.handle("muteHotkey:set", async (_event, accelerator: unknown) => {
+    const next = muteHotkeyFromStored(accelerator);
+    const status = muteHotkeys.set(next);
+    persistMuteAccelerator(status.accelerator);
+    return { accelerator: status.accelerator, registered: status.registered };
+  });
+
   // Always re-read from disk. The seller's Try again depends on picking up
   // a change they just made in OBS's WebSocket Server Settings.
   ipcMain.handle("obs:websocketConfig", async () => {
@@ -314,7 +372,8 @@ app.whenReady().then(() => {
 });
 
 app.on("will-quit", () => {
-  globalShortcut.unregisterAll();
+  muteHotkeys.releaseAll();
+  unregisterSceneHotkeys();
 });
 
 app.on("window-all-closed", () => {

@@ -27,3 +27,16 @@ export {
   type AudioSessionHandle,
   type AudioSnapshot,
 } from "./session.js";
+export {
+  applyMuteHotkeyToggle,
+  createMuteHotkeyController,
+  DEFAULT_MUTE_ACCELERATOR,
+  liveMicrophoneBanner,
+  MIC_OFF_BANNER,
+  MUTE_ACCELERATOR_CHOICES,
+  MUTE_HOTKEY_FAILED_COPY,
+  MUTE_HOTKEY_STORAGE_KEY,
+  muteAcceleratorLabel,
+  muteHotkeyFromStored,
+  type MuteHotkeyStatus,
+} from "./muteHotkey.js";

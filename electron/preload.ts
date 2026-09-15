@@ -91,6 +91,16 @@ const api = {
     ipcRenderer.on("hotkey", listener);
     return () => ipcRenderer.removeListener("hotkey", listener);
   },
+
+  getMuteHotkey: (): Promise<{ accelerator: string; registered: boolean }> =>
+    ipcRenderer.invoke("muteHotkey:get"),
+  setMuteHotkey: (accelerator: string): Promise<{ accelerator: string; registered: boolean }> =>
+    ipcRenderer.invoke("muteHotkey:set", accelerator),
+  onMuteHotkey: (callback: () => void): (() => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("mute-hotkey", listener);
+    return () => ipcRenderer.removeListener("mute-hotkey", listener);
+  },
 };
 
 export type WhatnotStudioApi = typeof api;

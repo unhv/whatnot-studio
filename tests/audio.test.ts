@@ -19,6 +19,11 @@ import {
   type AudioSnapshot,
 } from "../src/audio/index.js";
 import { initialAudioSettings, type AudioSettings } from "../src/state/audio.js";
+import {
+  applyMuteHotkeyToggle,
+  liveMicrophoneBanner,
+  MIC_OFF_BANNER,
+} from "../src/audio/muteHotkey.js";
 
 class FakeAudioClient extends FakeObsClient {
   reidentifyCalls: { eventSubscriptions: number }[] = [];
@@ -159,6 +164,95 @@ describe("mute", () => {
     });
     expect(unmuted).toBe(false);
   });
+
+  it("calls SetInputMute on Whatnot Voice only and never names Whatnot Computer", async () => {
+    const { client } = makeAudioFake({
+      echoMute: true,
+      inputs: [
+        { inputName: VOICE_INPUT_NAME, inputKind: VOICE_INPUT_KIND },
+        { inputName: DESKTOP_INPUT_NAME, inputKind: DESKTOP_INPUT_KIND },
+      ],
+    });
+    await setMicrophoneMuted(client, true);
+    expect(callsOf(client, "SetInputMute")).toEqual([
+      { requestType: "SetInputMute", requestData: { inputName: VOICE_INPUT_NAME, inputMuted: true } },
+    ]);
+    expect(JSON.stringify(client.calls)).not.toContain(DESKTOP_INPUT_NAME);
+  });
+
+  it("keeps desktop audio captured at the same volume while the mic is muted", async () => {
+    const { client, inputs } = makeAudioFake({
+      echoMute: true,
+      inputs: [
+        { inputName: VOICE_INPUT_NAME, inputKind: VOICE_INPUT_KIND },
+        { inputName: DESKTOP_INPUT_NAME, inputKind: DESKTOP_INPUT_KIND },
+      ],
+    });
+    const settings: AudioSettings = {
+      ...initialAudioSettings(),
+      micMuted: true,
+      desktopAudioOn: true,
+      desktopVolumeStep: "loud",
+    };
+    await applyAudioSettings(client, settings);
+    expect(inputs.some((i) => i.inputName === DESKTOP_INPUT_NAME)).toBe(true);
+    expect(
+      callsOf(client, "SetInputMute").filter((c) => c.requestData?.inputName === DESKTOP_INPUT_NAME)
+    ).toEqual([]);
+    expect(callsOf(client, "SetInputVolume").filter((c) => c.requestData?.inputName === DESKTOP_INPUT_NAME)).toEqual([
+      {
+        requestType: "SetInputVolume",
+        requestData: { inputName: DESKTOP_INPUT_NAME, inputVolumeMul: 1.5 },
+      },
+    ]);
+    expect(callsOf(client, "RemoveInput")).toEqual([]);
+
+    client.calls = [];
+    await setMicrophoneMuted(client, true);
+    expect(callsOf(client, "SetInputVolume")).toEqual([]);
+    expect(callsOf(client, "RemoveInput")).toEqual([]);
+    expect(JSON.stringify(client.calls)).not.toContain(DESKTOP_INPUT_NAME);
+    expect(inputs.some((i) => i.inputName === DESKTOP_INPUT_NAME)).toBe(true);
+  });
+
+  it("shows unmuted when OBS refuses the mute", async () => {
+    const { client } = makeAudioFake({ muteReported: false, echoMute: false });
+    const session = startAudioSession({
+      client,
+      url: "ws://127.0.0.1:4455",
+      settings: initialAudioSettings(),
+      onChange: () => {},
+    });
+    await waitUntil(() => session.getSnapshot().connected);
+    await session.setMuted(true);
+    expect(session.getSnapshot().settings.micMuted).toBe(false);
+    expect(liveMicrophoneBanner(session.getSnapshot().settings.micMuted)).toBeNull();
+    session.stop();
+  });
+
+  it("hotkey toggle and the mute button share one OBS-reported state", async () => {
+    const { client } = makeAudioFake({ echoMute: true });
+    const session = startAudioSession({
+      client,
+      url: "ws://127.0.0.1:4455",
+      settings: initialAudioSettings(),
+      onChange: () => {},
+    });
+    await waitUntil(() => session.getSnapshot().connected);
+
+    await session.setMuted(true);
+    expect(session.getSnapshot().settings.micMuted).toBe(true);
+    expect(liveMicrophoneBanner(true)).toEqual({ text: MIC_OFF_BANNER });
+
+    await applyMuteHotkeyToggle(session);
+    expect(session.getSnapshot().settings.micMuted).toBe(false);
+    expect(liveMicrophoneBanner(session.getSnapshot().settings.micMuted)).toBeNull();
+
+    await applyMuteHotkeyToggle(session);
+    expect(session.getSnapshot().settings.micMuted).toBe(true);
+    expect(liveMicrophoneBanner(session.getSnapshot().settings.micMuted)).toEqual({ text: MIC_OFF_BANNER });
+    session.stop();
+  });
 });
 
 describe("desktop audio", () => {
@@ -296,6 +390,35 @@ describe("reconnect reapply", () => {
     ]);
     expect(reapplied.some((c) => c.requestType === "SetInputMute" && c.requestData?.inputMuted === true)).toBe(true);
     expect(reapplied.some((c) => c.requestType === "SetInputVolume" && c.requestData?.inputVolumeMul === 1.5)).toBe(true);
+    session.stop();
+  });
+
+  it("a reconnect while muted comes back muted", async () => {
+    const { client } = makeAudioFake({ echoMute: true });
+    const session = startAudioSession({
+      client,
+      url: "ws://127.0.0.1:4455",
+      settings: { ...initialAudioSettings(), micMuted: true, desktopAudioOn: true },
+      onChange: () => {},
+    });
+    await waitUntil(() => session.getSnapshot().connected);
+    expect(session.getSnapshot().settings.micMuted).toBe(true);
+
+    client.emit("ConnectionClosed");
+    expect(session.getSnapshot().connected).toBe(false);
+    expect(session.getSnapshot().settings.micMuted).toBe(true);
+
+    client.calls = [];
+    session.retryNow();
+    await waitUntil(() => session.getSnapshot().connected === true);
+
+    expect(session.getSnapshot().settings.micMuted).toBe(true);
+    const muteCalls = callsOf(client, "SetInputMute").filter(
+      (c) => c.requestData?.inputName === VOICE_INPUT_NAME
+    );
+    expect(muteCalls.some((c) => c.requestData?.inputMuted === true)).toBe(true);
+    expect(muteCalls.some((c) => c.requestData?.inputMuted === false)).toBe(false);
+    expect(liveMicrophoneBanner(session.getSnapshot().settings.micMuted)).toEqual({ text: MIC_OFF_BANNER });
     session.stop();
   });
 });
