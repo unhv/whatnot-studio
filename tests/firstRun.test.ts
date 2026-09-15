@@ -117,12 +117,13 @@ describe("checkObsVersionWarning", () => {
 });
 
 describe("buildWhatnotStreamEncoderJson", () => {
-  it("puts Advanced bitrate/keyint/CBR/tune on the encoder JSON keys OBS actually reads", () => {
+  it("puts Advanced bitrate/keyint/CBR/tune/preset on the encoder JSON keys OBS actually reads", () => {
     expect(buildWhatnotStreamEncoderJson()).toEqual({
       bitrate: 3500,
       keyint_sec: 2,
       rate_control: "CBR",
       tune: "zerolatency",
+      preset: "veryfast",
     });
   });
 });
@@ -182,7 +183,7 @@ describe("applyWhatnotEncoderSettings", () => {
     expect(keyintForIntervalSec(60, 1)).toBe(120);
   });
 
-  it("writes SimpleOutput ini keys when the profile is in Simple mode, not AdvOut", async () => {
+  it("writes SimpleOutput ini keys when the profile is in Simple mode, not AdvOut video keys", async () => {
     const client = new FakeObsClient({
       SetProfileParameter: {},
       GetProfileParameter: profileParams({ mode: "Simple", encoder: "x264" }),
@@ -201,9 +202,10 @@ describe("applyWhatnotEncoderSettings", () => {
     expect(bitrateCalls.map((c) => c.requestData?.parameterCategory)).toEqual(["SimpleOutput"]);
     const x264Calls = setParamCalls(client, "x264Settings");
     expect(x264Calls.map((c) => c.requestData?.parameterCategory)).toEqual(["SimpleOutput"]);
-    expect(client.calls.some((c) => c.requestData?.parameterCategory === "AdvOut" && c.requestType === "SetProfileParameter")).toBe(
-      false
+    const advWrites = client.calls.filter(
+      (c) => c.requestType === "SetProfileParameter" && c.requestData?.parameterCategory === "AdvOut"
     );
+    expect(advWrites.map((c) => c.requestData?.parameterName)).toEqual(["AudioEncoder"]);
   });
 
   it("does not SetProfileParameter AdvOut/VBitrate — Advanced encode is streamEncoder.json", async () => {
@@ -216,10 +218,92 @@ describe("applyWhatnotEncoderSettings", () => {
     const advWrites = client.calls.filter(
       (c) => c.requestType === "SetProfileParameter" && c.requestData?.parameterCategory === "AdvOut"
     );
-    expect(advWrites).toEqual([]);
+    expect(advWrites.map((c) => `${c.requestData?.parameterName}=${c.requestData?.parameterValue}`)).toEqual([
+      "AudioEncoder=ffmpeg_opus",
+    ]);
     const bitrateCall = setParamCalls(client, "VBitrate")[0];
     expect(bitrateCall?.requestData?.parameterCategory).toBe("SimpleOutput");
     expect(bitrateCall?.requestData?.parameterValue).toBe("3500");
+  });
+
+  it("writes FFmpeg OPUS on AdvOut/AudioEncoder, not the decoy AdvOut/StreamAudioEncoder", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ mode: "Advanced", encoder: "obs_x264" }),
+      GetVideoSettings: videoSettings(),
+    });
+    await applyWhatnotEncoderSettings(client);
+    const audioCalls = setParamCalls(client, "AudioEncoder");
+    expect(audioCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          requestData: expect.objectContaining({
+            parameterCategory: "AdvOut",
+            parameterName: "AudioEncoder",
+            parameterValue: "ffmpeg_opus",
+          }),
+        }),
+      ])
+    );
+    expect(
+      client.calls.some(
+        (c) =>
+          c.requestType === "SetProfileParameter" &&
+          c.requestData?.parameterCategory === "AdvOut" &&
+          c.requestData?.parameterName === "StreamAudioEncoder"
+      )
+    ).toBe(false);
+    const simpleAudio = setParamCalls(client, "StreamAudioEncoder");
+    expect(simpleAudio.map((c) => `${c.requestData?.parameterCategory}=${c.requestData?.parameterValue}`)).toEqual([
+      "SimpleOutput=opus",
+    ]);
+  });
+
+  it("writes CPU usage preset where Advanced x264 actually reads it, not AdvOut/Preset", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ mode: "Advanced", encoder: "obs_x264" }),
+      GetVideoSettings: videoSettings(),
+    });
+    await applyWhatnotEncoderSettings(client);
+    const simplePreset = setParamCalls(client, "Preset");
+    expect(simplePreset.map((c) => `${c.requestData?.parameterCategory}=${c.requestData?.parameterValue}`)).toEqual([
+      "SimpleOutput=veryfast",
+    ]);
+    expect(
+      client.calls.some(
+        (c) =>
+          c.requestType === "SetProfileParameter" &&
+          (c.requestData?.parameterName === "Preset" || c.requestData?.parameterName === "x264Preset") &&
+          c.requestData?.parameterCategory === "AdvOut"
+      )
+    ).toBe(false);
+    expect(buildWhatnotStreamEncoderJson().preset).toBe("veryfast");
+  });
+
+  it("writes Simulcast Total Layers on Stream1/WHIPSimulcastTotalLayers and never SetStreamServiceSettings", async () => {
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+      GetProfileParameter: profileParams({ mode: "Advanced", encoder: "obs_x264" }),
+      GetVideoSettings: videoSettings(),
+    });
+    await applyWhatnotEncoderSettings(client);
+    const layerCalls = client.calls.filter(
+      (c) =>
+        c.requestType === "SetProfileParameter" &&
+        c.requestData?.parameterCategory === "Stream1" &&
+        c.requestData?.parameterName === "WHIPSimulcastTotalLayers"
+    );
+    expect(layerCalls).toHaveLength(1);
+    expect(layerCalls[0]?.requestData?.parameterValue).toBe("1");
+    expect(client.calls.some((c) => c.requestType === "SetStreamServiceSettings")).toBe(false);
+    expect(
+      client.calls.some(
+        (c) =>
+          c.requestType === "SetProfileParameter" &&
+          (c.requestData?.parameterName === "TotalLayers" || c.requestData?.parameterName === "Simulcast")
+      )
+    ).toBe(false);
   });
 
   it("does not mirror Simple x264Settings onto AdvOut when AdvOut/Encoder is nvenc, and says so", async () => {
@@ -426,7 +510,21 @@ describe("runFirstRunSetup", () => {
       keyint_sec: 2,
       rate_control: "CBR",
       tune: "zerolatency",
+      preset: "veryfast",
     });
+    const audioCall = client.calls.find(
+      (c) =>
+        c.requestType === "SetProfileParameter" &&
+        c.requestData?.parameterCategory === "AdvOut" &&
+        c.requestData?.parameterName === "AudioEncoder"
+    );
+    expect(audioCall?.requestData?.parameterValue).toBe("ffmpeg_opus");
+    const layersCall = client.calls.find(
+      (c) =>
+        c.requestType === "SetProfileParameter" && c.requestData?.parameterName === "WHIPSimulcastTotalLayers"
+    );
+    expect(layersCall?.requestData?.parameterCategory).toBe("Stream1");
+    expect(layersCall?.requestData?.parameterValue).toBe("1");
   });
 
   it("stops on a profile/collection mismatch and never sets the canvas or restarts", async () => {

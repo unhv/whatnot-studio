@@ -48,6 +48,7 @@ describe("runAppFirstRun", () => {
       keyint_sec: 2,
       rate_control: "CBR",
       tune: "zerolatency",
+      preset: "veryfast",
     });
     expect(bridge.launchObs).toHaveBeenCalledTimes(2); // initial + post-canvas restart
     expect(bridge.closeObs).toHaveBeenCalledTimes(1);

@@ -110,7 +110,13 @@ describe("compileScenePlan", () => {
               ...s,
               items: s.items.map((i) =>
                 i.sourceName === "Webcam" && i.transform
-                  ? { ...i, transform: { ...i.transform, positionX: i.transform.positionX + 50 } }
+                  ? {
+                      ...i,
+                      transform: {
+                        ...i.transform,
+                        positionX: (i.transform.positionX ?? 0) + 50,
+                      },
+                    }
                   : i
               ),
             }

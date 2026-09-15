@@ -165,6 +165,14 @@ export function checkObsVersionWarning(obsVersion: string): string | undefined {
 const DEFAULT_CANVAS_FPS = 30;
 const KEYFRAME_INTERVAL_SEC = 2;
 const WHATNOT_VBITRATE = "3500";
+/** Whatnot allows veryfast–ultrafast. veryfast is the existing Simple default
+ * on this machine and the obs-x264 fallback when the value is missing. */
+const WHATNOT_X264_PRESET = "veryfast";
+/** Advanced streaming audio encoder id (obs_enum_encoder_types). */
+const WHATNOT_ADV_AUDIO_ENCODER = "ffmpeg_opus";
+/** Simple streaming audio encoder id (the Output combo's item data). */
+const WHATNOT_SIMPLE_AUDIO_ENCODER = "opus";
+const WHATNOT_SIMULCAST_LAYERS = "1";
 
 export interface EncoderSettingsResult {
   encoderWarning?: string;
@@ -195,12 +203,14 @@ export function buildWhatnotStreamEncoderJson(): {
   keyint_sec: number;
   rate_control: string;
   tune: string;
+  preset: string;
 } {
   return {
     bitrate: Number(WHATNOT_VBITRATE),
     keyint_sec: KEYFRAME_INTERVAL_SEC,
     rate_control: "CBR",
     tune: "zerolatency",
+    preset: WHATNOT_X264_PRESET,
   };
 }
 
@@ -249,41 +259,56 @@ async function readCanvasFps(obs: ObsClient): Promise<{ fpsNumerator: number; fp
 /**
  * OWNERSHIP RULE EXCEPTION — documented and deliberate (HQ, 2026-09-15,
  * whatnot-show-tools-measured.md). Whatnot's Show Tools page cannot apply
- * four Output settings itself and instructs the seller to set them
+ * the Output settings itself and instructs the seller to set them
  * manually: Bitrate max 3500 Kbps (range 2500-3500), Keyframe Interval 2s,
- * Rate Control CBR, Tune zerolatency. Since Whatnot's page never writes
- * these itself, writing them here creates no conflict with the file-level
- * ownership rule — `SetStreamServiceSettings` remains untouched forever,
- * and so does everything else in Output/Stream, including `Output/Mode`.
+ * Rate Control CBR, Tune zerolatency, Audio Encoder FFmpeg OPUS, CPU Usage
+ * Preset veryfast–ultrafast, and Simulcast Total Layers 1. Since Whatnot's
+ * page never writes these itself, writing them here creates no conflict
+ * with the file-level ownership rule — `SetStreamServiceSettings` remains
+ * untouched forever, and so does `Output/Mode`.
  *
- * Where the four values actually live, and why we do not write AdvOut/*:
+ * Where the values actually live (measured on OBS 31.1.2, throwaway
+ * "Whatnot Studio Test" profile, 2026-09-15):
  * - Read `Output/Mode` first. Never change it. Whatnot's "update profile"
  *   button sets Advanced; flipping Mode here would be a fifth owned setting.
- * - Simple mode is governed by `[SimpleOutput]`. We write `VBitrate` there
- *   always, and `UseAdvanced` + `x264Settings=keyint=<2*fps> tune=zerolatency`
- *   only when *that category's* `StreamEncoder` is already x264.
+ * - Simple mode is governed by `[SimpleOutput]`. We write `VBitrate` and
+ *   `Preset=veryfast` there always, `StreamAudioEncoder=opus` always
+ *   (Simple combo data is `opus`/`aac`, not the FFmpeg id), and
+ *   `UseAdvanced` + `x264Settings=keyint=<2*fps> tune=zerolatency` only
+ *   when *that category's* `StreamEncoder` is already x264.
  * - Advanced mode is governed by `streamEncoder.json` (`bitrate`,
- *   `keyint_sec`, `rate_control`, `tune`) plus `[AdvOut] Encoder`.
- *   `SetProfileParameter` cannot populate that JSON. `AdvOut/VBitrate` and
- *   `AdvOut/x264Settings` are not keys OBS reads for the stream encode —
- *   the live "Whatnot Studio Test" profile has neither, and its
- *   `streamEncoder.json` is `{}`. Writing them is the same stored≠governs
- *   trap as the original SimpleOutput read-back. The JSON is written by
- *   `runFirstRunSetup` after OBS exits so the relaunch (and Whatnot's later
- *   Mode=Advanced) actually loads it.
+ *   `keyint_sec`, `rate_control`, `tune`, `preset`) plus `[AdvOut] Encoder`
+ *   and `[AdvOut] AudioEncoder`. `SetProfileParameter` cannot populate that
+ *   JSON. `AdvOut/VBitrate`, `AdvOut/x264Settings`, `AdvOut/Preset`, and
+ *   `AdvOut/StreamAudioEncoder` are not keys OBS reads for the stream
+ *   encode — live GetProfileParameter returned null for all four, while
+ *   `AdvOut/AudioEncoder` read `ffmpeg_opus` and matched basic.ini. Writing
+ *   the null keys is the same stored≠governs trap as the original
+ *   SimpleOutput read-back. The JSON is written by `runFirstRunSetup`
+ *   after OBS exits so the relaunch (and Whatnot's later Mode=Advanced)
+ *   actually loads it.
  * - SimpleOutput and AdvOut keep independent encoder ids. This machine's
  *   Untitled profile is Simple=nvenc / AdvOut=obs_nvenc_h264_tex; the
  *   throwaway test profile is Simple=nvenc / AdvOut=obs_x264. Mirroring
  *   x264Settings from the governing encoder onto the other category is
  *   how keyint/tune silently stop applying after Whatnot flips Mode.
+ * - Simulcast Total Layers is `Stream1/WHIPSimulcastTotalLayers` in
+ *   basic.ini, not `whip_custom` service settings. Live
+ *   GetStreamServiceSettings keys were only `bearer_token`, `server`,
+ *   `service`. SetProfileParameter round-tripped `1` and OBS wrote it to
+ *   `[Stream1]` immediately. We never call SetStreamServiceSettings.
  *
  * `keyint` in Simple `x264Settings` is 2 * fps (frames). Advanced JSON
  * uses `keyint_sec` (seconds) — the encoder UI's unit, fps-independent.
+ * Advanced x264 CPU preset is `preset` in that same JSON (obs-x264.c
+ * `obs_properties_add_list(props, "preset", TEXT_PRESET, ...)`; UI label
+ * CPUPreset). `SimpleOutput/Preset` is Simple-only.
  *
  * NVENC/AMF/QuickSync are not an edge case — this machine's default
  * Simple encoder was nvenc. Those encoders have no `x264Settings`/`tune`
- * field. Bitrate (and, in the encoder JSON, `keyint_sec` + CBR) still
- * apply; tune does not. A warning is returned rather than staying silent.
+ * field. Bitrate, audio encoder, simulcast layers, and the encoder JSON
+ * (`keyint_sec` + CBR + preset + tune) are still written; x264-only ini
+ * keys are skipped. A warning is returned rather than staying silent.
  * We do not force x264 onto the seller.
  */
 export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<EncoderSettingsResult> {
@@ -295,6 +320,10 @@ export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<Encod
   const advEncoder = await readCategoryEncoder(obs, "AdvOut");
 
   await setProfileParam(obs, "SimpleOutput", "VBitrate", WHATNOT_VBITRATE);
+  await setProfileParam(obs, "SimpleOutput", "Preset", WHATNOT_X264_PRESET);
+  await setProfileParam(obs, "SimpleOutput", "StreamAudioEncoder", WHATNOT_SIMPLE_AUDIO_ENCODER);
+  await setProfileParam(obs, "AdvOut", "AudioEncoder", WHATNOT_ADV_AUDIO_ENCODER);
+  await setProfileParam(obs, "Stream1", "WHIPSimulcastTotalLayers", WHATNOT_SIMULCAST_LAYERS);
 
   if (isX264Encoder(simpleEncoder)) {
     await setProfileParam(obs, "SimpleOutput", "UseAdvanced", "true");
@@ -312,10 +341,12 @@ export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<Encod
   return {
     encoderWarning:
       `Streaming encoder is "${named}", not x264. ` +
-      `Whatnot requires a ${KEYFRAME_INTERVAL_SEC}-second keyframe interval and Tune=zerolatency; ` +
+      `Whatnot requires a ${KEYFRAME_INTERVAL_SEC}-second keyframe interval, Tune=zerolatency, ` +
+      `and CPU Usage Preset ${WHATNOT_X264_PRESET}–ultrafast; ` +
       `those are x264 settings and were not written to the encoder that will govern after ` +
       `Whatnot sets Output Mode to Advanced. ` +
       `Bitrate is still capped at ${WHATNOT_VBITRATE} Kbps on SimpleOutput and in streamEncoder.json. ` +
+      `FFmpeg OPUS and Simulcast Total Layers ${WHATNOT_SIMULCAST_LAYERS} were still applied. ` +
       `Set OBS Output → Streaming Encoder to x264 to apply the remaining required values.`,
   };
 }
