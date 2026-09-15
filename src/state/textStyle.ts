@@ -6,6 +6,7 @@
 import { syncScenes } from "../obs/applyPlan.js";
 import type { ObsClient } from "../obs/client.js";
 import { loadCameraLayout } from "./cameraLayout.js";
+import { loadSurroundResolveOpts } from "./surround.js";
 import {
   buildDesiredScenes,
   clampOverlayPosition,
@@ -375,10 +376,12 @@ export class TextStyleObsSync {
     try {
       const itemBar = useAppStore.getState().itemBar;
       const overlays = this.lastState.overlays;
+      const layout = loadCameraLayout(typeof localStorage === "undefined" ? null : localStorage);
       const desired = buildDesiredScenes(
         config,
         { breakCard: overlays.breakCard.visible },
-        loadCameraLayout(typeof localStorage === "undefined" ? null : localStorage)
+        layout,
+        await loadSurroundResolveOpts(layout.surroundId)
       );
       const line = itemBarLine(itemBar) ?? "";
       for (const scene of desired) {

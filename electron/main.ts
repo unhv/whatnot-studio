@@ -252,6 +252,15 @@ app.whenReady().then(() => {
   // import node:fs, so scan/exists/mkdir go through here.
   const clipsFolder = () => path.join(app.getPath("userData"), "clips");
 
+  // Surround loops ship next to the app (extraResources), not inside asar,
+  // so OBS ffmpeg_source can open them. Dev reads the repo assets folder.
+  const surroundsFolder = () =>
+    app.isPackaged
+      ? path.join(process.resourcesPath, "surrounds")
+      : path.join(__dirname, "..", "..", "assets", "surrounds");
+
+  ipcMain.handle("surrounds:dir", async () => surroundsFolder());
+
   ipcMain.handle("clips:dir", async () => {
     const dir = clipsFolder();
     await fs.mkdir(dir, { recursive: true });

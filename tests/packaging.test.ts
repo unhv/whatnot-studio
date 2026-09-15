@@ -12,6 +12,7 @@ const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as
     productName: string;
     directories: { output: string };
     files: Array<string | { from: string; to: string }>;
+    extraResources?: Array<{ from: string; to: string }>;
     win: { icon: string; target: unknown; signAndEditExecutable?: boolean };
     nsis: {
       oneClick: boolean;
@@ -81,5 +82,17 @@ describe("windows installer packaging", () => {
     expect(main).toMatch(/sandbox:\s*true/);
     expect(main).toMatch(/contextIsolation:\s*true/);
     expect(main).toMatch(/preload:\s*path\.join\(__dirname,\s*"preload\.js"\)/);
+  });
+
+  it("ships surround loops outside asar so OBS can open them", () => {
+    const extra = pkg.build.extraResources ?? [];
+    expect(extra.some((e) => e.from.replaceAll("\\", "/") === "assets/surrounds" && e.to === "surrounds")).toBe(
+      true
+    );
+    const main = readFileSync(path.join(root, "electron", "main.ts"), "utf8");
+    expect(main).toMatch(/surrounds:dir/);
+    expect(main).toMatch(/process\.resourcesPath/);
+    const preload = readFileSync(path.join(root, "electron", "preload.ts"), "utf8");
+    expect(preload).toMatch(/surroundsDir/);
   });
 });

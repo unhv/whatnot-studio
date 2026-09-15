@@ -4,6 +4,7 @@ import type { ObsClient } from "../obs/client.js";
 import { enumerateStudioDevices } from "../obs/devices.js";
 import { buildDesiredScenes } from "../obs/sceneCompiler.js";
 import { loadCameraLayout, type StorageLike } from "../state/cameraLayout.js";
+import { loadSurroundResolveOpts } from "../state/surround.js";
 import { loadTextStyle } from "../state/textStyle.js";
 import { persistableShowConfig, useAppStore } from "../state/store.js";
 import {
@@ -85,16 +86,19 @@ export function startLiveScreenSession(opts: {
   const { client, url, password, retryMs = STUDIO_RETRY_MS, healthPollMs = HEALTH_POLL_MS } = opts;
   const applyScenes =
     opts.applyScenes ??
-    ((obs) => {
+    (async (obs) => {
       const config = useAppStore.getState().showConfig;
+      const layout = loadCameraLayout(
+        opts.layoutStorage !== undefined ? opts.layoutStorage : browserLayoutStorage()
+      );
+      const surroundOpts = await loadSurroundResolveOpts(layout.surroundId);
       return syncScenes(
         obs as ObsClient,
         buildDesiredScenes(
           config,
           { breakCard: loadTextStyle(config.showName).overlays.breakCard.visible },
-          loadCameraLayout(
-            opts.layoutStorage !== undefined ? opts.layoutStorage : browserLayoutStorage()
-          )
+          layout,
+          surroundOpts
         )
       );
     });

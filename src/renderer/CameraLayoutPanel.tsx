@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { RealObsClient } from "../obs/client.js";
 import type { ObsClient } from "../obs/client.js";
+import { syncScenes } from "../obs/applyPlan.js";
+import { buildDesiredScenes, keepSurroundAndCameraOps } from "../obs/sceneCompiler.js";
 import {
   CAMERA_LAYOUT_COPY,
   CAMERA_LAYOUT_OBS_DEBOUNCE_MS,
@@ -22,6 +24,16 @@ import {
   type InsetSize,
   type StorageLike,
 } from "../state/cameraLayout.js";
+import {
+  loadSurroundResolveOpts,
+  NONE_SURROUND_ID,
+  pickerEntries,
+  resolveSurround,
+  SURROUND_COPY,
+  type SurroundId,
+  type SurroundResolveOpts,
+} from "../state/surround.js";
+import { loadTextStyle } from "../state/textStyle.js";
 import { CANVAS_HEIGHT, CANVAS_WIDTH } from "../shared/types.js";
 import { useAppStore } from "../state/store.js";
 
@@ -62,10 +74,13 @@ export default function CameraLayoutPanel(props: {
   layoutRef.current = layout;
 
   const syncRef = useRef<CameraLayoutObsSync | null>(null);
+  const clientRef = useRef<ObsClient | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ grabX: number; grabY: number } | null>(null);
   const panelConnectedRef = useRef(props.client !== undefined);
+  const surroundOptsRef = useRef<SurroundResolveOpts>({});
   const [panelConnected, setPanelConnected] = useState(() => props.client !== undefined);
+  const [missingSurround, setMissingSurround] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +89,8 @@ export default function CameraLayoutPanel(props: {
     const connectedRef = panelConnectedRef;
     connectedRef.current = !owned;
     if (owned) setPanelConnected(false);
+
+    clientRef.current = client;
 
     const sync = new CameraLayoutObsSync({
       getClient: () => client,
@@ -89,6 +106,7 @@ export default function CameraLayoutPanel(props: {
       debounceMs: props.debounceMs ?? CAMERA_LAYOUT_OBS_DEBOUNCE_MS,
       clock: props.clock,
       storage,
+      getSurroundOpts: () => surroundOptsRef.current,
     });
     syncRef.current = sync;
 
@@ -121,10 +139,23 @@ export default function CameraLayoutPanel(props: {
       client.off("ConnectionClosed", onClosed);
       connectedRef.current = false;
       syncRef.current = null;
+      clientRef.current = null;
       sync.dispose();
       if (owned) void client.disconnect();
     };
   }, [obsPort, obsPassword, props.client, props.clock, props.debounceMs, storage]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadSurroundResolveOpts(layout.surroundId).then((opts) => {
+      if (cancelled) return;
+      surroundOptsRef.current = opts;
+      setMissingSurround(resolveSurround(layout.surroundId, opts).message);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [layout.surroundId]);
 
   function apply(action: CameraLayoutAction): void {
     const next = cameraLayoutReducer(layoutRef.current, action);
@@ -132,6 +163,39 @@ export default function CameraLayoutPanel(props: {
     setLayout(next);
     persistCameraLayout(next, storage);
     syncRef.current?.notify(action, next);
+    if (action.type === "SET_SURROUND") {
+      void (async () => {
+        await applySurroundScenes(next);
+        syncRef.current?.resync(next);
+      })();
+    }
+  }
+
+  async function applySurroundScenes(next: CameraLayout): Promise<void> {
+    const client = clientRef.current;
+    if (!client || !panelConnectedRef.current) return;
+    const cfg = useAppStore.getState().showConfig;
+    const breakVisible = loadTextStyle(cfg.showName).overlays.breakCard.visible;
+    const opts = await loadSurroundResolveOpts(next.surroundId);
+    surroundOptsRef.current = opts;
+    setMissingSurround(resolveSurround(next.surroundId, opts).message);
+    const cameraNames = [cfg.camera?.label ?? "Camera"];
+    if (cfg.captureCard?.label) cameraNames.push(cfg.captureCard.label);
+    try {
+      await syncScenes(
+        client,
+        buildDesiredScenes(cfg, { breakCard: breakVisible }, next, opts),
+        keepSurroundAndCameraOps(cameraNames)
+      );
+    } catch {
+      // missing socket or OBS error must not throw into the picker
+    }
+  }
+
+  function pickSurround(id: SurroundId): void {
+    const current = layout.surroundId ?? NONE_SURROUND_ID;
+    const nextId = id !== NONE_SURROUND_ID && current === id ? NONE_SURROUND_ID : id;
+    apply({ type: "SET_SURROUND", surroundId: nextId });
   }
 
   function previewToCanvas(clientX: number, clientY: number): { x: number; y: number } | null {
@@ -189,6 +253,32 @@ export default function CameraLayoutPanel(props: {
       aria-label={CAMERA_LAYOUT_COPY.title}
     >
       <h2 className="text-lg font-semibold">{CAMERA_LAYOUT_COPY.title}</h2>
+
+      <div>
+        <div className="mb-2 text-sm text-neutral-300">{SURROUND_COPY.title}</div>
+        <div className="flex flex-wrap gap-2">
+          {pickerEntries().map((entry) => {
+            const selected = (layout.surroundId ?? NONE_SURROUND_ID) === entry.id;
+            return (
+              <button
+                key={entry.id}
+                type="button"
+                className={`h-16 min-w-[4.5rem] flex-1 rounded-md px-3 text-base font-semibold ${
+                  selected ? selectedBtn : idleBtn
+                }`}
+                onClick={() => pickSurround(entry.id)}
+              >
+                {entry.label}
+              </button>
+            );
+          })}
+        </div>
+        {missingSurround ? (
+          <p className="mt-2 rounded-md bg-amber-950 px-3 py-2 text-sm text-amber-200 ring-1 ring-amber-800">
+            {missingSurround}
+          </p>
+        ) : null}
+      </div>
 
       {!twoCameras ? (
         <p className="rounded-md bg-neutral-950 px-3 py-3 text-sm text-neutral-300 ring-1 ring-neutral-800">

@@ -12,6 +12,15 @@ import {
   CANVAS_WIDTH,
   type ShowConfig,
 } from "../shared/types.js";
+import {
+  mapRectIntoWindow,
+  NONE_SURROUND_ID,
+  parseSurroundId,
+  resolveSurround,
+  type SurroundId,
+  type SurroundRect,
+  type SurroundResolveOpts,
+} from "./surround.js";
 
 export const CAMERA_LAYOUT_SETTINGS_KEY = "whatnot-studio-camera-layout";
 
@@ -68,6 +77,8 @@ export interface CameraLayout {
   insetSize: InsetSize;
   insetX: number;
   insetY: number;
+  /** `"none"` is a real choice and the default. */
+  surroundId: SurroundId;
 }
 
 export interface CameraRect {
@@ -143,6 +154,7 @@ export function defaultCameraLayout(): CameraLayout {
     insetSize,
     insetX: pos.x,
     insetY: pos.y,
+    surroundId: NONE_SURROUND_ID,
   };
 }
 
@@ -155,6 +167,7 @@ export type CameraLayoutAction =
   | { type: "MOVE_INSET"; x: number; y: number }
   | { type: "END_DRAG" }
   | { type: "SNAP"; corner: Corner }
+  | { type: "SET_SURROUND"; surroundId: SurroundId }
   | { type: "HYDRATE"; layout: CameraLayout };
 
 export function cameraLayoutReducer(state: CameraLayout, action: CameraLayoutAction): CameraLayout {
@@ -180,6 +193,8 @@ export function cameraLayoutReducer(state: CameraLayout, action: CameraLayoutAct
       const pos = cornerPosition(action.corner, state.insetSize);
       return { ...state, kind: "inset", insetX: pos.x, insetY: pos.y };
     }
+    case "SET_SURROUND":
+      return { ...state, surroundId: parseSurroundId(action.surroundId) };
     case "HYDRATE":
       return parseCameraLayout(action.layout);
     default:
@@ -213,6 +228,7 @@ export function parseCameraLayout(raw: unknown): CameraLayout {
     insetSize,
     insetX: pos.x,
     insetY: pos.y,
+    surroundId: parseSurroundId(rec.surroundId),
   };
 }
 
@@ -274,6 +290,10 @@ function rectToTransform(x: number, y: number, w: number, h: number): LayoutTran
   };
 }
 
+export function transformForRect(rect: SurroundRect): LayoutTransform {
+  return rectToTransform(rect.x, rect.y, rect.w, rect.h);
+}
+
 export function cameraRects(layout: CameraLayout): { webcam: CameraRect; table: CameraRect } {
   if (layout.kind === "split") {
     const half = CANVAS_HEIGHT / 2;
@@ -289,14 +309,20 @@ export function cameraRects(layout: CameraLayout): { webcam: CameraRect; table: 
   return { webcam: full, table: inset };
 }
 
-export function bothCameraTransforms(layout: CameraLayout): {
+export function bothCameraTransforms(
+  layout: CameraLayout,
+  window?: SurroundRect
+): {
   webcam: LayoutTransform;
   table: LayoutTransform;
 } {
+  const frame = window ?? resolveSurround(layout.surroundId).cameraRect;
   const rects = cameraRects(layout);
+  const webcam = mapRectIntoWindow(rects.webcam, frame);
+  const table = mapRectIntoWindow(rects.table, frame);
   return {
-    webcam: rectToTransform(rects.webcam.x, rects.webcam.y, rects.webcam.w, rects.webcam.h),
-    table: rectToTransform(rects.table.x, rects.table.y, rects.table.w, rects.table.h),
+    webcam: transformForRect(webcam),
+    table: transformForRect(table),
   };
 }
 
@@ -359,6 +385,7 @@ export interface CameraLayoutObsSyncOpts {
   debounceMs?: number;
   clock?: CameraLayoutClock;
   storage?: StorageLike | null;
+  getSurroundOpts?: () => SurroundResolveOpts | undefined;
 }
 
 /**
@@ -394,6 +421,13 @@ export class CameraLayoutObsSync {
     if (action.type === "MOVE_INSET") {
       this.pending = next;
       this.schedule();
+      return;
+    }
+    if (action.type === "SET_SURROUND") {
+      // Scene compile owns the first write. Flushing BOTH transforms here
+      // races it and can pin the cameras under the surround.
+      this.clearTimer();
+      this.pending = next;
       return;
     }
     this.pending = next;
@@ -445,7 +479,10 @@ export class CameraLayoutObsSync {
     const names = this.opts.getSourceNames();
     const client = this.readyClient();
     if (!names || !client) return;
-    const transforms = bothCameraTransforms(layout);
+    const resolved = resolveSurround(layout.surroundId, this.opts.getSurroundOpts?.());
+    const transforms = bothCameraTransforms(layout, resolved.cameraRect);
+    // OBS: index 0 is the bottom. A surround occupies 0; cameras sit on 1/2.
+    const cameraIndexBase = resolved.sourceName ? 1 : 0;
     try {
       const tableId = await this.resolveItemId(client, names.table);
       const webcamId = await this.resolveItemId(client, names.webcam);
@@ -466,12 +503,12 @@ export class CameraLayoutObsSync {
           await client.call("SetSceneItemIndex", {
             sceneName: "BOTH",
             sceneItemId: mainId,
-            sceneItemIndex: 0,
+            sceneItemIndex: cameraIndexBase,
           });
           await client.call("SetSceneItemIndex", {
             sceneName: "BOTH",
             sceneItemId: insetId,
-            sceneItemIndex: 1,
+            sceneItemIndex: cameraIndexBase + 1,
           });
         } catch {
           // index is best-effort; transforms still landed

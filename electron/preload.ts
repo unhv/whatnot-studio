@@ -28,6 +28,7 @@ const api = {
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke("shell:openExternal", url),
 
   clipsDir: (): Promise<string> => ipcRenderer.invoke("clips:dir"),
+  surroundsDir: (): Promise<string> => ipcRenderer.invoke("surrounds:dir"),
   clipsMkdir: (dir: string): Promise<void> => ipcRenderer.invoke("clips:mkdir", dir),
   clipsReaddir: (dir: string): Promise<string[]> => ipcRenderer.invoke("clips:readdir", dir),
   clipsExists: (filePath: string): Promise<boolean> => ipcRenderer.invoke("clips:exists", filePath),

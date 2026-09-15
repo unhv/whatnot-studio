@@ -56,6 +56,12 @@
         ]
       }
     ],
+    "extraResources": [
+      {
+        "from": "assets/surrounds",
+        "to": "surrounds"
+      }
+    ],
     "asar": true,
     "npmRebuild": false,
     "compression": "normal",

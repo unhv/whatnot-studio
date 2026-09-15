@@ -335,6 +335,63 @@ describe("OBS disconnected", () => {
   });
 });
 
+describe("BOTH z-order with a surround", () => {
+  function indexCalls(client: FakeObsClient) {
+    return client.calls
+      .filter((c) => c.requestType === "SetSceneItemIndex")
+      .map((c) => ({
+        sceneItemId: c.requestData?.sceneItemId,
+        sceneItemIndex: c.requestData?.sceneItemIndex,
+      }));
+  }
+
+  it("pins cameras at 0 and 1 when there is no surround", async () => {
+    const client = makeClient();
+    const sync = makeSync(client);
+    sync.resync(DEFAULT_CAMERA_LAYOUT);
+    await sync.idle();
+    expect(indexCalls(client)).toEqual([
+      { sceneItemId: 1, sceneItemIndex: 0 },
+      { sceneItemId: 2, sceneItemIndex: 1 },
+    ]);
+  });
+
+  it("leaves index 0 for the surround and writes cameras at 1 and 2", async () => {
+    const layout = cameraLayoutReducer(DEFAULT_CAMERA_LAYOUT, {
+      type: "SET_SURROUND",
+      surroundId: "warm-glow",
+    });
+    const client = makeClient();
+    const sync = makeSync(client);
+    sync.resync(layout);
+    await sync.idle();
+    expect(indexCalls(client)).toEqual([
+      { sceneItemId: 1, sceneItemIndex: 1 },
+      { sceneItemId: 2, sceneItemIndex: 2 },
+    ]);
+  });
+
+  it("does not race SET_SURROUND against the BOTH transform write", async () => {
+    const layout = cameraLayoutReducer(DEFAULT_CAMERA_LAYOUT, {
+      type: "SET_SURROUND",
+      surroundId: "cool-dusk",
+    });
+    const client = makeClient();
+    const sync = makeSync(client);
+    sync.notify({ type: "SET_SURROUND", surroundId: "cool-dusk" }, layout);
+    await sync.idle();
+    expect(transformCalls(client)).toEqual([]);
+    expect(indexCalls(client)).toEqual([]);
+    sync.resync(layout);
+    await sync.idle();
+    expect(transformCalls(client)).toHaveLength(2);
+    expect(indexCalls(client)).toEqual([
+      { sceneItemId: 1, sceneItemIndex: 1 },
+      { sceneItemId: 2, sceneItemIndex: 2 },
+    ]);
+  });
+});
+
 describe("buildDesiredScenes BOTH layout", () => {
   it("only the BOTH camera transforms change with the named layout", () => {
     const inset = buildDesiredScenes(config, undefined, DEFAULT_CAMERA_LAYOUT);

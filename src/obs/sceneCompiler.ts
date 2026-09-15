@@ -14,8 +14,18 @@ import { computeContain, computeCropToFill, type CropToFill } from "../../spike/
 import {
   bothCameraTransforms,
   DEFAULT_CAMERA_LAYOUT,
+  transformForRect,
   type CameraLayout,
 } from "../state/cameraLayout.js";
+import {
+  isSurroundSourceName,
+  resolveSurround,
+  surroundFillTransform,
+  surroundInputSettings,
+  SURROUND_SOURCE_KIND,
+  type ResolvedSurround,
+  type SurroundResolveOpts,
+} from "../state/surround.js";
 import {
   ASSUMED_SOURCE_HEIGHT,
   ASSUMED_SOURCE_WIDTH,
@@ -88,7 +98,36 @@ export type ObsOp =
   | { type: "CreateScene"; sceneName: string }
   | { type: "CreateSceneItem"; sceneName: string; sourceName: string }
   | { type: "SetSceneItemTransform"; sceneName: string; sourceName: string; transform: Transform }
-  | { type: "SetSceneItemEnabled"; sceneName: string; sourceName: string; enabled: boolean };
+  | { type: "SetSceneItemEnabled"; sceneName: string; sourceName: string; enabled: boolean }
+  | { type: "SetSceneItemIndex"; sceneName: string; sourceName: string; sceneItemIndex: number }
+  | { type: "RemoveSceneItem"; sceneName: string; sourceName: string }
+  | { type: "RemoveInput"; inputName: string };
+
+/** Name the op touches, or null for scene-only ops. */
+export function opSourceName(op: ObsOp): string | null {
+  switch (op.type) {
+    case "CreateInput":
+    case "RemoveInput":
+      return op.inputName;
+    case "CreateScene":
+      return null;
+    default:
+      return op.sourceName;
+  }
+}
+
+/**
+ * Picker taps must not rebuild overlays: a showing Item Bar, a playing clip,
+ * or a moved lower-third would otherwise be compiled back to stock.
+ */
+export function keepSurroundAndCameraOps(cameraNames: readonly string[]): (op: ObsOp) => boolean {
+  const names = new Set(cameraNames);
+  return (op) => {
+    const name = opSourceName(op);
+    if (name === null) return false;
+    return isSurroundSourceName(name) || names.has(name);
+  };
+}
 
 const TRANSFORM_EPS = 0.01;
 
@@ -447,6 +486,21 @@ export function identityTransform(): Transform {
   };
 }
 
+function surroundLayer(resolved: ResolvedSurround): DesiredSceneItem | null {
+  if (!resolved.sourceName || !resolved.filePath) return null;
+  return {
+    sourceName: resolved.sourceName,
+    sourceKind: SURROUND_SOURCE_KIND,
+    inputSettings: surroundInputSettings(resolved.filePath),
+    transform: surroundFillTransform(),
+    enabled: true,
+  };
+}
+
+function withSurround(layer: DesiredSceneItem | null, rest: DesiredSceneItem[]): DesiredSceneItem[] {
+  return layer ? [layer, ...rest] : rest;
+}
+
 /** Overlays created disabled so a fresh setup shows nothing until the seller puts something up. */
 function cameraFacingOverlays(): DesiredSceneItem[] {
   return [
@@ -478,36 +532,40 @@ function cameraFacingOverlays(): DesiredSceneItem[] {
  * `overlayVisible.breakCard` is the seller's show/hide; omit it and BREAK
  * still comes up with BE RIGHT BACK on. Item bar / SOLD stay compiled
  * disabled — those flags belong to the SHOW/CLEAR/SOLD path.
- * `bothLayout` only affects the BOTH scene's camera transforms. Live apply
- * must pass the persisted layout; the default is the stock inset. */
+ * `bothLayout` only affects the BOTH scene's camera transforms, except
+ * `surroundId` which frames every camera-facing scene. Live apply must
+ * pass the persisted layout; the default is the stock inset and `"none"`. */
 export function buildDesiredScenes(
   config: ShowConfig,
   overlayVisible?: Partial<Record<TextOverlayId, boolean>>,
-  bothLayout: CameraLayout = DEFAULT_CAMERA_LAYOUT
+  bothLayout: CameraLayout = DEFAULT_CAMERA_LAYOUT,
+  surroundOpts?: SurroundResolveOpts
 ): DesiredScene[] {
   const cameraName = config.camera?.label ?? "Camera";
   const tableName = config.captureCard?.label ?? cameraName;
 
-  const full = fullCanvasFillTransform();
+  const resolved = resolveSurround(bothLayout.surroundId, surroundOpts);
+  const layer = surroundLayer(resolved);
+  const cameraT = transformForRect(resolved.cameraRect);
   const overlays = cameraFacingOverlays();
 
   const meScene: DesiredScene = {
     sceneName: "ME",
-    items: [
+    items: withSurround(layer, [
       {
         sourceName: cameraName,
         sourceKind: "dshow_input",
         inputSettings: config.camera ? { video_device_id: config.camera.deviceId } : undefined,
-        transform: full,
+        transform: cameraT,
         enabled: true,
       },
       ...overlays,
-    ],
+    ]),
   };
 
   const tableScene: DesiredScene = {
     sceneName: "TABLE",
-    items: [
+    items: withSurround(layer, [
       {
         sourceName: tableName,
         sourceKind: "dshow_input",
@@ -516,16 +574,16 @@ export function buildDesiredScenes(
           : config.camera
             ? { video_device_id: config.camera.deviceId }
             : undefined,
-        transform: full,
+        transform: cameraT,
         enabled: true,
       },
       ...overlays,
-    ],
+    ]),
   };
 
-  // BOTH: camera transforms come from the named layout. Main sits under
-  // the inset so the small camera stays visible; overlays sit on top.
-  const bothT = bothCameraTransforms(bothLayout);
+  // BOTH: camera transforms come from the named layout, mapped into the
+  // surround window. Main sits under the inset; surround sits under both.
+  const bothT = bothCameraTransforms(bothLayout, resolved.cameraRect);
   const tableItem: DesiredSceneItem = {
     sourceName: tableName,
     sourceKind: "dshow_input",
@@ -544,7 +602,7 @@ export function buildDesiredScenes(
       : [cameraItem, tableItem];
   const bothScene: DesiredScene = {
     sceneName: "BOTH",
-    items: [...camerasFirst, ...overlays],
+    items: withSurround(layer, [...camerasFirst, ...overlays]),
   };
 
   const breakScene: DesiredScene = {
@@ -630,6 +688,38 @@ export function compileScenePlan(desired: DesiredScene[], current: CurrentObsSta
           enabled: item.enabled,
         });
       }
+
+      if (isSurroundSourceName(item.sourceName) && (!existingItem || createdIntoThisScene)) {
+        ops.push({
+          type: "SetSceneItemIndex",
+          sceneName: scene.sceneName,
+          sourceName: item.sourceName,
+          sceneItemIndex: 0,
+        });
+      }
+    }
+  }
+
+  const desiredNames = new Set<string>();
+  for (const scene of desired) {
+    for (const item of scene.items) desiredNames.add(item.sourceName);
+  }
+  const desiredSceneNames = new Set(desired.map((s) => s.sceneName));
+  for (const scene of current.scenes) {
+    if (!desiredSceneNames.has(scene.name)) continue;
+    for (const item of scene.items) {
+      if (isSurroundSourceName(item.sourceName) && !desiredNames.has(item.sourceName)) {
+        ops.push({
+          type: "RemoveSceneItem",
+          sceneName: scene.name,
+          sourceName: item.sourceName,
+        });
+      }
+    }
+  }
+  for (const input of current.inputs) {
+    if (isSurroundSourceName(input.name) && !desiredNames.has(input.name)) {
+      ops.push({ type: "RemoveInput", inputName: input.name });
     }
   }
 
@@ -687,6 +777,30 @@ export function applyOpsToState(current: CurrentObsState, ops: ObsOp[]): Current
         const scene = getOrCreateScene(op.sceneName);
         const item = scene.items.find((i) => i.sourceName === op.sourceName);
         if (item) item.enabled = op.enabled;
+        break;
+      }
+      case "SetSceneItemIndex": {
+        const scene = getOrCreateScene(op.sceneName);
+        const idx = scene.items.findIndex((i) => i.sourceName === op.sourceName);
+        if (idx >= 0) {
+          const [moved] = scene.items.splice(idx, 1);
+          const insertAt = Math.min(Math.max(op.sceneItemIndex, 0), scene.items.length);
+          scene.items.splice(insertAt, 0, moved);
+        }
+        break;
+      }
+      case "RemoveSceneItem": {
+        const scene = scenes.find((s) => s.name === op.sceneName);
+        if (scene) scene.items = scene.items.filter((i) => i.sourceName !== op.sourceName);
+        break;
+      }
+      case "RemoveInput": {
+        const keep = inputs.filter((i) => i.name !== op.inputName);
+        inputs.length = 0;
+        inputs.push(...keep);
+        for (const scene of scenes) {
+          scene.items = scene.items.filter((i) => i.sourceName !== op.inputName);
+        }
         break;
       }
     }

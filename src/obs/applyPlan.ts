@@ -13,6 +13,7 @@ import {
   type CurrentObsState,
   type CurrentScene,
   type DesiredScene,
+  type ObsOp,
 } from "./sceneCompiler.js";
 
 interface GetSceneListResponse {
@@ -67,9 +68,14 @@ export async function readCurrentObsState(obs: ObsClient): Promise<CurrentObsSta
 
 /** Compile and apply a plan against OBS's real, freshly-read state.
  * Running this twice in a row issues zero requests the second time. */
-export async function syncScenes(obs: ObsClient, desired: DesiredScene[]): Promise<void> {
+export async function syncScenes(
+  obs: ObsClient,
+  desired: DesiredScene[],
+  keepOp?: (op: ObsOp) => boolean
+): Promise<void> {
   const current = await readCurrentObsState(obs);
-  const ops = compileScenePlan(desired, current);
+  const compiled = compileScenePlan(desired, current);
+  const ops = keepOp ? compiled.filter(keepOp) : compiled;
 
   // Applied sequentially and in the order compiled — a create must land
   // before the transform/enable ops that depend on it existing.
@@ -112,6 +118,26 @@ export async function syncScenes(obs: ObsClient, desired: DesiredScene[]): Promi
         });
         break;
       }
+      case "SetSceneItemIndex": {
+        const itemId = await resolveSceneItemId(obs, op.sceneName, op.sourceName);
+        await obs.call("SetSceneItemIndex", {
+          sceneName: op.sceneName,
+          sceneItemId: itemId,
+          sceneItemIndex: op.sceneItemIndex,
+        });
+        break;
+      }
+      case "RemoveSceneItem": {
+        const itemId = await resolveSceneItemId(obs, op.sceneName, op.sourceName);
+        await obs.call("RemoveSceneItem", {
+          sceneName: op.sceneName,
+          sceneItemId: itemId,
+        });
+        break;
+      }
+      case "RemoveInput":
+        await obs.call("RemoveInput", { inputName: op.inputName });
+        break;
     }
   }
 
