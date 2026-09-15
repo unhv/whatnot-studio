@@ -16,6 +16,7 @@ import {
 } from "./firstRun.js";
 import type { ObsClient } from "./client.js";
 import { PROFILE_NAME } from "../shared/types.js";
+import type { EncoderIds, QualityPresetId } from "./quality.js";
 
 /** The minimal slice of `window.whatnotStudio` this module needs -- kept
  * narrow and structural (not importing the preload's concrete type) so a
@@ -98,6 +99,9 @@ export interface RunAppFirstRunOptions {
   /** Constructs a fresh ObsClient each time OBS is (re)connected to. Real
    * callers pass `() => new RealObsClient()`; tests pass a fake factory. */
   makeObsClient(): ObsClient;
+  qualityPreset?: QualityPresetId;
+  hardwareEncoder?: boolean;
+  existingPreviousEncoders?: EncoderIds | null;
 }
 
 /** Run the full first-run flow against the real app's IPC bridge. */
@@ -111,6 +115,9 @@ export async function runAppFirstRun(opts: RunAppFirstRunOptions): Promise<First
     fs,
     profileName,
     alreadyRunning: opts.obsAlreadyRunning === true,
+    qualityPreset: opts.qualityPreset,
+    hardwareEncoder: opts.hardwareEncoder,
+    existingPreviousEncoders: opts.existingPreviousEncoders,
     launch: async () => {
       if (opts.obsAlreadyRunning) return { pid: 0, reused: true };
       return opts.bridge.launchObs({ port: opts.port, password: opts.password, profileName });

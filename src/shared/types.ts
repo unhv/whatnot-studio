@@ -12,6 +12,9 @@ export interface DeviceChoice {
   label: string;
 }
 
+/** Seller's quality choice. Automatic re-tests at go-live; Best/Steady are pinned. */
+export type QualityChoice = "automatic" | "best" | "steady";
+
 export interface ShowConfig {
   showName: string;
   camera: DeviceChoice | null;
@@ -21,6 +24,16 @@ export interface ShowConfig {
   captureCard: DeviceChoice | null;
   obsPassword: string;
   obsPort: number;
+  /** Default automatic. Re-tested at go-live rather than blindly reused. */
+  qualityChoice?: QualityChoice;
+  /** Opt-in graphics-card encoder. Off by default; never auto-detected. */
+  hardwareEncoder?: boolean;
+  /** True after we write a hardware encoder, until Go Live confirms or we revert. */
+  hardwareEncoderPending?: boolean;
+  previousSimpleEncoder?: string | null;
+  previousAdvEncoder?: string | null;
+  /** One line of what Automatic found, in words. */
+  lastQualitySummary?: string | null;
 }
 
 export const PROFILE_NAME = "Whatnot Studio";

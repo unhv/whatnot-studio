@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ItemBarObsSync, setItemBarObsSync, useAppStore } from "../state/store.js";
 import { elapsedMs, liveScreenCopy } from "../obs/liveMode.js";
+import { QUALITY_WHILE_LIVE } from "../obs/quality.js";
 import { RealObsClient } from "../obs/client.js";
 import { formatElapsed, formatPrice } from "../shared/format.js";
 import { deriveLowerThirdText } from "../state/itemBar.js";
@@ -30,6 +31,8 @@ export default function LiveScreen() {
   const obsPassword = useAppStore((s) => s.showConfig.obsPassword);
   const showName = useAppStore((s) => s.showConfig.showName);
   const showConfig = useAppStore((s) => s.showConfig);
+  const healthWarning = useAppStore((s) => s.healthWarning);
+  const encoderRevertMessage = useAppStore((s) => s.encoderRevertMessage);
   const { state: textStyle, dispatch: dispatchText, syncRef: textSyncRef, stateRef: textStyleRef } =
     useTextStyleSession(showName);
   const dispatchTextRef = useRef(dispatchText);
@@ -127,6 +130,15 @@ export default function LiveScreen() {
             </div>
             {status.secondary ? (
               <div className="text-sm font-normal text-amber-200/80">{status.secondary}</div>
+            ) : null}
+            {healthWarning ? (
+              <div className="text-sm font-normal text-amber-200/80">{healthWarning.message}</div>
+            ) : null}
+            {healthWarning ? (
+              <div className="text-sm font-normal text-neutral-500">{QUALITY_WHILE_LIVE}</div>
+            ) : null}
+            {encoderRevertMessage ? (
+              <div className="text-sm font-normal text-amber-200/80">{encoderRevertMessage}</div>
             ) : null}
           </div>
         </div>

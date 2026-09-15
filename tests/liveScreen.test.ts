@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   initialLiveState,
   liveScreenCopy,
@@ -22,6 +25,8 @@ import {
   type StorageLike,
 } from "../src/state/cameraLayout.js";
 import { DEFAULT_SHOW_CONFIG } from "../src/state/store.js";
+import { ENCODER_REVERT_MESSAGE, QUALITY_WHILE_LIVE } from "../src/obs/quality.js";
+import { HEALTH_MACHINE, HEALTH_NETWORK } from "../src/obs/health.js";
 
 class MemoryStorage implements StorageLike {
   private data = new Map<string, string>();
@@ -380,6 +385,69 @@ describe("LiveScreen session — studio socket drop", () => {
         useAppStore.getState().live.socketDisconnected === false
     );
     expect(attempts).toBe(2);
+    session.stop();
+  });
+});
+
+describe("LIVE screen — quality health and encoder revert", () => {
+  const liveSrc = readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "renderer", "LiveScreen.tsx"),
+    "utf8"
+  );
+
+  beforeEach(() => {
+    useAppStore.setState({
+      live: initialLiveState(0),
+      connectionStatus: "disconnected",
+      screen: "live",
+      healthWarning: null,
+      encoderRevertMessage: null,
+      showConfig: { ...DEFAULT_SHOW_CONFIG },
+    });
+  });
+
+  it("shows distinct network and machine copy, no mid-show quality control, and never StartStream", () => {
+    expect(liveSrc).toContain("healthWarning");
+    expect(liveSrc).toContain("QUALITY_WHILE_LIVE");
+    expect(liveSrc).toContain("encoderRevertMessage");
+    expect(liveSrc).not.toMatch(/lower the quality/i);
+    expect(liveSrc).not.toMatch(/StartStream/);
+    expect(liveSrc).not.toMatch(/StopStream/);
+    expect(QUALITY_WHILE_LIVE).toMatch(/before the next show/);
+    expect(HEALTH_NETWORK).toMatch(/internet/);
+    expect(HEALTH_MACHINE).toMatch(/computer/);
+  });
+
+  it("reverts the graphics-card encoder when Go Live never becomes live", async () => {
+    useAppStore.setState({
+      showConfig: {
+        ...DEFAULT_SHOW_CONFIG,
+        hardwareEncoder: true,
+        hardwareEncoderPending: true,
+        previousSimpleEncoder: "x264",
+        previousAdvEncoder: "obs_x264",
+      },
+    });
+    const client = new FakeObsClient({
+      SetProfileParameter: {},
+    });
+    const session = startLiveScreenSession({
+      client,
+      url: "ws://127.0.0.1:4455",
+      password: "",
+      applyScenes: async () => {},
+    });
+    await waitUntil(() => useAppStore.getState().connectionStatus === "connected");
+    client.emit("StreamStateChanged", event("OBS_WEBSOCKET_OUTPUT_STARTING", false));
+    client.emit("StreamStateChanged", event("OBS_WEBSOCKET_OUTPUT_STOPPED", false));
+    await waitUntil(() => useAppStore.getState().encoderRevertMessage === ENCODER_REVERT_MESSAGE);
+    expect(useAppStore.getState().showConfig.hardwareEncoder).toBe(false);
+    expect(useAppStore.getState().showConfig.hardwareEncoderPending).toBe(false);
+    const encoderWrites = client.calls.filter(
+      (c) => c.requestType === "SetProfileParameter" && c.requestData?.parameterName === "StreamEncoder"
+    );
+    expect(encoderWrites[encoderWrites.length - 1]?.requestData?.parameterValue).toBe("x264");
+    expect(client.calls.some((c) => c.requestType === "StartStream" || c.requestType === "StopStream")).toBe(false);
     session.stop();
   });
 });

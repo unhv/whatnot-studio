@@ -11,3 +11,5 @@ release/
 
 scratch/
 .playwright-mcp/
+.verify/
+.pipeline/

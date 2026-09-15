@@ -4,7 +4,7 @@
  * through persistableShowConfig so the OBS websocket password is never
  * stored as plain JSON.
  */
-import type { DeviceChoice, ShowConfig } from "../shared/types.js";
+import type { DeviceChoice, QualityChoice, ShowConfig } from "../shared/types.js";
 import { CAMERA_LAYOUT_SETTINGS_KEY } from "./cameraLayout.js";
 import { persistableShowConfig } from "./store.js";
 
@@ -130,6 +130,16 @@ function parsePort(raw: unknown): number {
   return 4455;
 }
 
+function parseQualityChoice(raw: unknown): QualityChoice {
+  if (raw === "best" || raw === "steady" || raw === "automatic") return raw;
+  return "automatic";
+}
+
+function parseOptionalString(raw: unknown): string | null {
+  if (typeof raw === "string" && raw !== "") return raw;
+  return null;
+}
+
 /** Accept a stored show config; always blank the password. */
 export function parsePersistedShowConfig(raw: unknown): ShowConfig | null {
   const rec = asRecord(raw);
@@ -145,6 +155,12 @@ export function parsePersistedShowConfig(raw: unknown): ShowConfig | null {
     captureCard,
     obsPassword: typeof rec.obsPassword === "string" ? rec.obsPassword : "",
     obsPort: parsePort(rec.obsPort),
+    qualityChoice: parseQualityChoice(rec.qualityChoice),
+    hardwareEncoder: rec.hardwareEncoder === true,
+    hardwareEncoderPending: rec.hardwareEncoderPending === true,
+    previousSimpleEncoder: parseOptionalString(rec.previousSimpleEncoder),
+    previousAdvEncoder: parseOptionalString(rec.previousAdvEncoder),
+    lastQualitySummary: typeof rec.lastQualitySummary === "string" ? rec.lastQualitySummary : null,
   };
   return persistableShowConfig(config);
 }
@@ -281,6 +297,12 @@ export function decideLaunchScreen(
     captureCard: null,
     obsPassword: "",
     obsPort: 4455,
+    qualityChoice: "automatic",
+    hardwareEncoder: false,
+    hardwareEncoderPending: false,
+    previousSimpleEncoder: null,
+    previousAdvEncoder: null,
+    lastQualitySummary: null,
   });
   const show = resolveActiveShow(state);
   if (!show) {

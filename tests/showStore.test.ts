@@ -81,6 +81,33 @@ describe("named show store", () => {
     expect(JSON.parse(disk).shows[0].config.obsPassword).toBe("");
   });
 
+  it("round-trips the quality choice and hardware-encoder opt-in through the persisted show config", () => {
+    const cfg = persistableShowConfig({
+      ...saturday,
+      qualityChoice: "steady",
+      hardwareEncoder: true,
+      lastQualitySummary: "Tested your upload — streaming at Steady.",
+    });
+    const stored = upsertShow(EMPTY_SHOW_STORE, cfg);
+    const json = showStoreToJson(stored);
+    const loaded = parseShowStore(json);
+    const found = showByName(loaded, "Saturday Night Vintage");
+    expect(found!.config.qualityChoice).toBe("steady");
+    expect(found!.config.hardwareEncoder).toBe(true);
+    expect(found!.config.lastQualitySummary).toBe("Tested your upload — streaming at Steady.");
+    expect(found!.config.obsPassword).toBe("");
+
+    const old = parseShowStore(
+      JSON.stringify({
+        version: 1,
+        lastUsedName: "Saturday Night Vintage",
+        shows: [{ name: "Saturday Night Vintage", config: { ...saturday, qualityChoice: undefined } }],
+      })
+    );
+    expect(showByName(old, "Saturday Night Vintage")!.config.qualityChoice).toBe("automatic");
+    expect(showByName(old, "Saturday Night Vintage")!.config.hardwareEncoder).toBe(false);
+  });
+
   it("treats a missing, empty, or malformed store as a first run and does not throw", () => {
     for (const raw of [null, undefined, "", "{}", "{", "not-json", 12, [], { shows: "nope" }]) {
       expect(() => parseShowStore(raw)).not.toThrow();

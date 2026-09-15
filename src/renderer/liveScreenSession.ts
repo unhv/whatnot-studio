@@ -5,7 +5,27 @@ import { enumerateStudioDevices } from "../obs/devices.js";
 import { buildDesiredScenes } from "../obs/sceneCompiler.js";
 import { loadCameraLayout, type StorageLike } from "../state/cameraLayout.js";
 import { loadTextStyle } from "../state/textStyle.js";
-import { useAppStore } from "../state/store.js";
+import { persistableShowConfig, useAppStore } from "../state/store.js";
+import {
+  foldHealth,
+  HEALTH_POLL_MS,
+  healthSampleFromObs,
+  initialHealthState,
+} from "../obs/health.js";
+import {
+  ENCODER_REVERT_MESSAGE,
+  foldEncoderGoLive,
+  idleEncoderWatch,
+  pendingEncoderWatch,
+  revertHardwareEncoder,
+} from "../obs/quality.js";
+import { applyGoLiveQuality } from "./goLiveQuality.js";
+import {
+  parseShowStore,
+  serializeShowStore,
+  snapshotShowExtras,
+  upsertShow,
+} from "../state/showStore.js";
 
 function browserLayoutStorage(): StorageLike | null {
   try {
@@ -28,7 +48,7 @@ export function clearStudioDropFlag(): void {
 export function returnToSetup(): void {
   const live = useAppStore.getState().live;
   if (!canReturnToSetup(live)) return;
-  useAppStore.setState({ screen: "setup" });
+  useAppStore.setState({ screen: "setup", goLiveQualityApplied: false });
 }
 
 /**
@@ -38,17 +58,31 @@ export function returnToSetup(): void {
  * socket, so we reconnect and resubscribe — otherwise a later STOPPED never
  * arrives and the seller cannot leave this screen.
  */
+async function persistShowConfigPatch(): Promise<void> {
+  const api = typeof window !== "undefined" ? window.whatnotStudio : undefined;
+  if (!api || typeof api.loadShowStore !== "function" || typeof api.saveShowStore !== "function") return;
+  try {
+    const config = persistableShowConfig(useAppStore.getState().showConfig);
+    const raw = await api.loadShowStore();
+    const next = upsertShow(parseShowStore(raw), config, snapshotShowExtras(config.showName));
+    await api.saveShowStore(serializeShowStore(next));
+  } catch {
+    // in-memory patch still holds for this session
+  }
+}
+
 export function startLiveScreenSession(opts: {
   client: Pick<ObsClient, "connect" | "disconnect" | "on" | "off" | "call">;
   url: string;
   password?: string;
   retryMs?: number;
+  healthPollMs?: number;
   /** Override for tests. Default applies `buildDesiredScenes` once per session. */
   applyScenes?: (client: Pick<ObsClient, "call">) => Promise<void>;
   /** Injected storage for the persisted BOTH layout. Default is localStorage. */
   layoutStorage?: StorageLike | null;
 }): { stop: () => void; retryNow: () => void } {
-  const { client, url, password, retryMs = STUDIO_RETRY_MS } = opts;
+  const { client, url, password, retryMs = STUDIO_RETRY_MS, healthPollMs = HEALTH_POLL_MS } = opts;
   const applyScenes =
     opts.applyScenes ??
     ((obs) => {
@@ -67,8 +101,51 @@ export function startLiveScreenSession(opts: {
   let cancelled = false;
   let inFlight = false;
   let scenesApplied = false;
+  let qualityApplyStarted = false;
   let unsubscribe = () => {};
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let healthTimer: ReturnType<typeof setInterval> | null = null;
+  let health = initialHealthState(Date.now());
+
+  function stopHealthPoll() {
+    if (healthTimer !== null) {
+      clearInterval(healthTimer);
+      healthTimer = null;
+    }
+  }
+
+  async function pollHealth() {
+    if (cancelled) return;
+    try {
+      const stream = await client.call<{
+        outputSkippedFrames?: number;
+        outputBytes?: number;
+        outputCongestion?: number;
+      }>("GetStreamStatus");
+      const stats = await client.call<{
+        renderSkippedFrames?: number;
+        cpuUsage?: number;
+      }>("GetStats");
+      const live = useAppStore.getState().live;
+      health = foldHealth(
+        health,
+        healthSampleFromObs(stream, stats, { live: live.live, reconnecting: live.reconnecting }),
+        Date.now()
+      );
+      if (!cancelled) useAppStore.getState().setHealthWarning(health.warning);
+    } catch {
+      // A failed poll is not a warning.
+    }
+  }
+
+  function startHealthPoll() {
+    stopHealthPoll();
+    health = initialHealthState(Date.now());
+    void pollHealth();
+    healthTimer = setInterval(() => {
+      void pollHealth();
+    }, healthPollMs);
+  }
 
   function clearRetry() {
     if (retryTimer !== null) {
@@ -128,14 +205,52 @@ export function startLiveScreenSession(opts: {
       // after a blip when the seller is not (yet) live.
       clearStudioDropFlag();
       setConnectionStatus("connected");
+      const cfg = useAppStore.getState().showConfig;
+      if (cfg.hardwareEncoderPending) {
+        useAppStore.getState().setEncoderWatch(
+          pendingEncoderWatch({
+            simple: cfg.previousSimpleEncoder ?? null,
+            adv: cfg.previousAdvEncoder ?? null,
+          })
+        );
+      } else {
+        useAppStore.getState().setEncoderWatch(idleEncoderWatch());
+      }
       unsubscribe = subscribeObsLiveState(client, {
-        onStreamStateChanged: applyStreamStateChanged,
+        onStreamStateChanged: (event, now) => {
+          applyStreamStateChanged(event, now);
+          const store = useAppStore.getState();
+          const folded = foldEncoderGoLive(store.encoderWatch, event);
+          store.setEncoderWatch(folded.next);
+          if (folded.action === "confirm") {
+            store.setShowConfig({ hardwareEncoderPending: false });
+            void persistShowConfigPatch();
+          }
+          if (folded.action === "revert") {
+            void (async () => {
+              try {
+                await revertHardwareEncoder(client as ObsClient, folded.next.previous);
+              } catch {
+                // revert is best-effort; still tell the seller
+              }
+              if (cancelled) return;
+              useAppStore.getState().setShowConfig({
+                hardwareEncoder: false,
+                hardwareEncoderPending: false,
+              });
+              useAppStore.getState().setEncoderRevertMessage(ENCODER_REVERT_MESSAGE);
+              void persistShowConfigPatch();
+            })();
+          }
+        },
         onSocketDisconnect: (t) => {
           applySocketDisconnect(t);
           setConnectionStatus("disconnected");
+          stopHealthPoll();
           scheduleRetry();
         },
       });
+      startHealthPoll();
       // Enumeration feeds the stored-camera re-check but must never block
       // session setup or the listener re-attach behind an OBS request the
       // seller's live session does not need to wait on — a slow or
@@ -155,6 +270,23 @@ export function startLiveScreenSession(opts: {
         .catch(() => {
           // Failed to list devices is not "enumerated without this camera".
         });
+      // Boot-to-LIVE and picker-to-LIVE skip Setup's Continue. Re-test here
+      // so a noon measurement cannot pin a 9pm show. Do not await: the
+      // upload probe can take seconds and must not hold inFlight.
+      if (!qualityApplyStarted && !useAppStore.getState().goLiveQualityApplied) {
+        qualityApplyStarted = true;
+        void applyGoLiveQuality({ obs: client as ObsClient })
+          .then((result) => {
+            if (cancelled) return;
+            useAppStore.getState().setGoLiveQualityApplied(true);
+            if (result.cameraMissing) {
+              useAppStore.getState().goToSetup();
+            }
+          })
+          .catch(() => {
+            qualityApplyStarted = false;
+          });
+      }
     } catch {
       if (!cancelled) {
         applySocketDisconnect(Date.now());
@@ -172,6 +304,7 @@ export function startLiveScreenSession(opts: {
     stop: () => {
       cancelled = true;
       clearRetry();
+      stopHealthPoll();
       unsubscribe();
       void client.disconnect();
     },

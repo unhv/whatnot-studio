@@ -80,6 +80,12 @@ const api = {
   loadShowStoreSync: (): unknown => ipcRenderer.sendSync("shows:loadSync"),
   saveShowStore: (payload: unknown): Promise<void> => ipcRenderer.invoke("shows:save", payload),
 
+  probeUpload: (): Promise<{
+    outcome: "ok" | "failed" | "timeout" | "unavailable";
+    sustainedKbps: number | null;
+    loadedRttMs: number | null;
+  }> => ipcRenderer.invoke("quality:probeUpload"),
+
   onHotkey: (callback: (key: "F1" | "F2" | "F3" | "F4" | "F5") => void): (() => void) => {
     const listener = (_event: unknown, key: "F1" | "F2" | "F3" | "F4" | "F5") => callback(key);
     ipcRenderer.on("hotkey", listener);

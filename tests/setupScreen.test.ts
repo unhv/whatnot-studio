@@ -130,3 +130,23 @@ describe("setup screen — Continue is disabled while a stored camera is known-m
     expect(src).toContain("setSetupResumeMessage(picked.decision.setupResumeMessage)");
   });
 });
+
+describe("setup screen — Internet & quality", () => {
+  it("renders the quality card with Automatic, Best, Steady, Re-test, and the graphics-card opt-in", () => {
+    expect(src).toContain("Internet & quality");
+    expect(src).toContain("Automatic (recommended)");
+    expect(src).toContain("QualityCard");
+    expect(src).toContain("HARDWARE_ENCODER_LABEL");
+    expect(src).toContain("prepareQualityForGoLive");
+    expect(src).toContain("handleRetest");
+    expect(src).toContain("missingCameraMessage");
+    expect(src).toContain("existingPreviousEncoders");
+    expect(src).toContain("revertHardwareEncoder");
+    // The rule is about seller-facing copy, not identifiers: `sustainedKbps`
+    // and `bitrateKbps` are property names, not rendered labels. A word
+    // boundary excludes those while still catching a real label like
+    // "2500 Kbps".
+    expect(src).not.toMatch(/\bKbps\b/);
+    expect(src).not.toMatch(/\bkbps\b/);
+  });
+});

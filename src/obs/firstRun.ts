@@ -21,6 +21,23 @@
 import { buildMinimalProfileIni, slugifyObsName, writeIniSection } from "../../spike/lib.js";
 import type { ObsClient } from "./client.js";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, PROFILE_NAME } from "../shared/types.js";
+import {
+  applyHardwareEncoderOptIn,
+  applyVideoQuality,
+  clampWhatnotBitrate,
+  DEFAULT_CANVAS_FPS,
+  getQualityPreset,
+  KEYFRAME_INTERVAL_SEC,
+  revertHardwareEncoder,
+  streamEncoderJsonForBitrate,
+  WHATNOT_ADV_AUDIO_ENCODER,
+  WHATNOT_BITRATE_MAX_KBPS,
+  WHATNOT_SIMPLE_AUDIO_ENCODER,
+  WHATNOT_SIMULCAST_LAYERS,
+  WHATNOT_X264_PRESET,
+  type EncoderIds,
+  type QualityPresetId,
+} from "./quality.js";
 
 export interface ProfileListResult {
   profiles: string[];
@@ -66,12 +83,15 @@ export function verifyProfileAndCollection(
 /** Build basic.ini content for the product's profile, reusing the tested
  * spike helper for the [Video] section and overriding [General].Name on
  * top of it via writeIniSection rather than duplicating that logic. */
-export function buildFirstRunProfileIni(profileName: string = PROFILE_NAME): string {
+export function buildFirstRunProfileIni(
+  profileName: string = PROFILE_NAME,
+  output?: { width: number; height: number }
+): string {
   const base = buildMinimalProfileIni({
     baseWidth: CANVAS_WIDTH,
     baseHeight: CANVAS_HEIGHT,
-    outputWidth: CANVAS_WIDTH,
-    outputHeight: CANVAS_HEIGHT,
+    outputWidth: output?.width ?? CANVAS_WIDTH,
+    outputHeight: output?.height ?? CANVAS_HEIGHT,
     fpsNum: 30,
     fpsDen: 1,
   });
@@ -147,6 +167,8 @@ export interface FirstRunResult {
   /** Set when the streaming encoder is not x264, so keyframe interval and
    * zerolatency tune cannot be written. Bitrate is still capped. */
   encoderWarning?: string;
+  /** Previous encoder ids, set when the seller opted into hardware encode. */
+  hardwareEncoderPrevious?: EncoderIds;
 }
 
 /** Pure — takes obs-websocket's own `obsVersion` string and returns a
@@ -161,18 +183,7 @@ export function checkObsVersionWarning(obsVersion: string): string | undefined {
   return undefined;
 }
 
-/** Matches `SetVideoSettings` / `buildFirstRunProfileIni` in this file. */
-const DEFAULT_CANVAS_FPS = 30;
-const KEYFRAME_INTERVAL_SEC = 2;
-const WHATNOT_VBITRATE = "3500";
-/** Whatnot allows veryfast–ultrafast. veryfast is the existing Simple default
- * on this machine and the obs-x264 fallback when the value is missing. */
-const WHATNOT_X264_PRESET = "veryfast";
-/** Advanced streaming audio encoder id (obs_enum_encoder_types). */
-const WHATNOT_ADV_AUDIO_ENCODER = "ffmpeg_opus";
-/** Simple streaming audio encoder id (the Output combo's item data). */
-const WHATNOT_SIMPLE_AUDIO_ENCODER = "opus";
-const WHATNOT_SIMULCAST_LAYERS = "1";
+const WHATNOT_VBITRATE = String(WHATNOT_BITRATE_MAX_KBPS);
 
 export interface EncoderSettingsResult {
   encoderWarning?: string;
@@ -198,20 +209,14 @@ function isX264Encoder(value: string | null | undefined): boolean {
 }
 
 /** Advanced output reads this file, not `[AdvOut] VBitrate` / `x264Settings`. */
-export function buildWhatnotStreamEncoderJson(): {
+export function buildWhatnotStreamEncoderJson(bitrateKbps: number = WHATNOT_BITRATE_MAX_KBPS): {
   bitrate: number;
   keyint_sec: number;
   rate_control: string;
   tune: string;
   preset: string;
 } {
-  return {
-    bitrate: Number(WHATNOT_VBITRATE),
-    keyint_sec: KEYFRAME_INTERVAL_SEC,
-    rate_control: "CBR",
-    tune: "zerolatency",
-    preset: WHATNOT_X264_PRESET,
-  };
+  return streamEncoderJsonForBitrate(bitrateKbps);
 }
 
 export function streamEncoderJsonPathFromProfileIni(profileIniPath: string): string {
@@ -311,7 +316,12 @@ async function readCanvasFps(obs: ObsClient): Promise<{ fpsNumerator: number; fp
  * keys are skipped. A warning is returned rather than staying silent.
  * We do not force x264 onto the seller.
  */
-export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<EncoderSettingsResult> {
+export async function applyWhatnotEncoderSettings(
+  obs: ObsClient,
+  options?: { bitrateKbps?: number }
+): Promise<EncoderSettingsResult> {
+  const bitrateKbps = clampWhatnotBitrate(options?.bitrateKbps ?? WHATNOT_BITRATE_MAX_KBPS);
+  const bitrate = String(bitrateKbps);
   const mode = await readProfileParam(obs, "Output", "Mode");
   const { fpsNumerator, fpsDenominator } = await readCanvasFps(obs);
   const keyint = keyintForIntervalSec(fpsNumerator, fpsDenominator);
@@ -319,7 +329,7 @@ export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<Encod
   const simpleEncoder = await readCategoryEncoder(obs, "SimpleOutput");
   const advEncoder = await readCategoryEncoder(obs, "AdvOut");
 
-  await setProfileParam(obs, "SimpleOutput", "VBitrate", WHATNOT_VBITRATE);
+  await setProfileParam(obs, "SimpleOutput", "VBitrate", bitrate);
   await setProfileParam(obs, "SimpleOutput", "Preset", WHATNOT_X264_PRESET);
   await setProfileParam(obs, "SimpleOutput", "StreamAudioEncoder", WHATNOT_SIMPLE_AUDIO_ENCODER);
   await setProfileParam(obs, "AdvOut", "AudioEncoder", WHATNOT_ADV_AUDIO_ENCODER);
@@ -345,7 +355,7 @@ export async function applyWhatnotEncoderSettings(obs: ObsClient): Promise<Encod
       `and CPU Usage Preset ${WHATNOT_X264_PRESET}–ultrafast; ` +
       `those are x264 settings and were not written to the encoder that will govern after ` +
       `Whatnot sets Output Mode to Advanced. ` +
-      `Bitrate is still capped at ${WHATNOT_VBITRATE} Kbps on SimpleOutput and in streamEncoder.json. ` +
+      `Bitrate is still capped at ${bitrate} Kbps on SimpleOutput and in streamEncoder.json. ` +
       `FFmpeg OPUS and Simulcast Total Layers ${WHATNOT_SIMULCAST_LAYERS} were still applied. ` +
       `Set OBS Output → Streaming Encoder to x264 to apply the remaining required values.`,
   };
@@ -369,6 +379,12 @@ export interface FirstRunDeps {
   profileName?: string;
   /** Setup already has a live websocket. Skip spawn, close, and disk profile writes. */
   alreadyRunning?: boolean;
+  /** Output resolution + bitrate. Canvas stays 1080x1920. Default Best. */
+  qualityPreset?: QualityPresetId;
+  /** Seller opted into the graphics-card encoder. Off by default. */
+  hardwareEncoder?: boolean;
+  /** Keep the original software encoder ids across a second opt-in apply. */
+  existingPreviousEncoders?: EncoderIds | null;
 }
 
 /**
@@ -416,15 +432,19 @@ export async function switchToProfileAndCollection(
 export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResult> {
   const profileName = deps.profileName ?? PROFILE_NAME;
   const alreadyRunning = deps.alreadyRunning === true;
+  const quality = getQualityPreset(deps.qualityPreset ?? "best");
 
   const encoderJsonPath =
     deps.paths.streamEncoderJsonPath ?? streamEncoderJsonPathFromProfileIni(deps.paths.profileIniPath);
-  const encoderJson = JSON.stringify(buildWhatnotStreamEncoderJson());
+  const encoderJson = JSON.stringify(buildWhatnotStreamEncoderJson(quality.bitrateKbps));
   await deps.fs.mkdir(deps.fs.dirname(encoderJsonPath));
 
   if (!alreadyRunning) {
     await deps.fs.mkdir(deps.fs.dirname(deps.paths.profileIniPath));
-    await deps.fs.writeFile(deps.paths.profileIniPath, buildFirstRunProfileIni(profileName));
+    await deps.fs.writeFile(
+      deps.paths.profileIniPath,
+      buildFirstRunProfileIni(profileName, { width: quality.outputWidth, height: quality.outputHeight })
+    );
 
     await deps.fs.mkdir(deps.fs.dirname(deps.paths.sceneCollectionJsonPath));
     await deps.fs.writeFile(
@@ -455,22 +475,24 @@ export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResu
   const version = await obs.call<{ obsVersion: string }>("GetVersion");
   const versionWarning = checkObsVersionWarning(version.obsVersion);
 
-  await obs.call("SetVideoSettings", {
-    baseWidth: CANVAS_WIDTH,
-    baseHeight: CANVAS_HEIGHT,
-    outputWidth: CANVAS_WIDTH,
-    outputHeight: CANVAS_HEIGHT,
-    fpsNumerator: 30,
-    fpsDenominator: 1,
-  });
-  const { encoderWarning } = await applyWhatnotEncoderSettings(obs);
+  await applyVideoQuality(obs, quality);
+  const { encoderWarning } = await applyWhatnotEncoderSettings(obs, { bitrateKbps: quality.bitrateKbps });
+  let hardwareEncoderPrevious: EncoderIds | undefined;
+  if (deps.hardwareEncoder) {
+    hardwareEncoderPrevious = (await applyHardwareEncoderOptIn(obs, deps.existingPreviousEncoders)).previous;
+  } else if (
+    deps.existingPreviousEncoders &&
+    (deps.existingPreviousEncoders.simple != null || deps.existingPreviousEncoders.adv != null)
+  ) {
+    await revertHardwareEncoder(obs, deps.existingPreviousEncoders);
+  }
   await obs.disconnect();
 
   if (reused) {
     // We do not own this OBS process. Close+relaunch would spawn a second
     // obs64 onto the same port; SetVideoSettings already applied live.
     await deps.fs.writeFile(encoderJsonPath, encoderJson);
-    return { ok: true, pid, versionWarning, encoderWarning };
+    return { ok: true, pid, versionWarning, encoderWarning, hardwareEncoderPrevious };
   }
 
   // The canvas setting only takes effect for Whatnot's health check after a
@@ -484,5 +506,5 @@ export async function runFirstRunSetup(deps: FirstRunDeps): Promise<FirstRunResu
   const obs2 = await deps.connect();
   await obs2.disconnect();
 
-  return { ok: true, pid: relaunched.pid, versionWarning, encoderWarning };
+  return { ok: true, pid: relaunched.pid, versionWarning, encoderWarning, hardwareEncoderPrevious };
 }

@@ -11,15 +11,28 @@ import {
   SETUP_TRY_AGAIN,
   setupContinueAllowed,
 } from "../state/setupDevices.js";
-import type { DeviceChoice } from "../shared/types.js";
+import type { DeviceChoice, QualityChoice } from "../shared/types.js";
 import { runAppFirstRun } from "../obs/runSetup.js";
 import { RealObsClient, startObsSetupSession } from "../obs/client.js";
 import type { ObsWebsocketConfig } from "../obs/obsConfig.js";
 import { enumerateStudioDevices } from "../obs/devices.js";
+import { applyWhatnotEncoderSettings } from "../obs/firstRun.js";
+import {
+  applyQualityChange,
+  getQualityPreset,
+  HARDWARE_ENCODER_LABEL,
+  nextHardwarePreviousSnapshot,
+  prepareQualityForGoLive,
+  revertHardwareEncoder,
+  type EncoderIds,
+  type QualityPresetId,
+  type UploadProbeResult,
+} from "../obs/quality.js";
 import {
   applyShowExtras,
   deviceEnumForLaunch,
   EMPTY_SHOW_STORE,
+  missingCameraMessage,
   parseShowStore,
   resumePickedShow,
   serializeShowStore,
@@ -35,6 +48,30 @@ import {
  * else is built as a separate flow. Three dropdowns, a show name, and a
  * copy-password button. Device lists come from OBS via
  * GetInputPropertiesListPropertyItems (never browser enumerateDevices). */
+function storedPreviousEncoders(cfg: {
+  previousSimpleEncoder?: string | null;
+  previousAdvEncoder?: string | null;
+}): EncoderIds | null {
+  const previous = {
+    simple: cfg.previousSimpleEncoder ?? null,
+    adv: cfg.previousAdvEncoder ?? null,
+  };
+  if (previous.simple == null && previous.adv == null) return null;
+  return previous;
+}
+
+function keepHardwarePrevious(captured: EncoderIds): EncoderIds {
+  const latest = useAppStore.getState().showConfig;
+  const stored = storedPreviousEncoders(latest);
+  return nextHardwarePreviousSnapshot(
+    {
+      pending: stored != null || latest.hardwareEncoderPending === true,
+      previous: stored ?? { simple: null, adv: null },
+    },
+    captured
+  );
+}
+
 function loadSavedShowsNow(): ShowStoreState {
   try {
     const api = window.whatnotStudio;
@@ -58,6 +95,8 @@ export default function SetupScreen() {
   const [setupError, setSetupError] = useState<string | null>(null);
   const [saved, setSaved] = useState<ShowStoreState>(loadSavedShowsNow);
   const retryRef = useRef<() => void>(() => {});
+  const qualityTesting = useAppStore((s) => s.qualityTesting);
+  const setQualityTesting = useAppStore((s) => s.setQualityTesting);
 
   useEffect(() => {
     const client = new RealObsClient();
@@ -106,16 +145,149 @@ export default function SetupScreen() {
   const videoDevices = deviceEnum.video;
   const audioDevices = deviceEnum.audio;
 
+  async function probeUpload(): Promise<UploadProbeResult> {
+    if (typeof window.whatnotStudio.probeUpload !== "function") {
+      return { outcome: "unavailable", sustainedKbps: null, loadedRttMs: null };
+    }
+    return window.whatnotStudio.probeUpload();
+  }
+
+  async function writeEncoderJson(contents: string): Promise<void> {
+    const paths = await window.whatnotStudio.firstRunPaths();
+    await window.whatnotStudio.writeFirstRunFiles({
+      streamEncoderJsonPath: paths.streamEncoderJsonPath,
+      streamEncoderJson: contents,
+    });
+  }
+
+  async function reenumerateAfterQuality(opts: {
+    preset: QualityPresetId;
+    hardwareEncoder: boolean;
+    camera: DeviceChoice | null;
+    port: number;
+    password: string;
+    existingPreviousEncoders?: EncoderIds | null;
+  }): Promise<boolean> {
+    const client = new RealObsClient();
+    try {
+      await client.connect(`ws://127.0.0.1:${opts.port}`, opts.password);
+      const applied = await applyQualityChange({
+        obs: client,
+        preset: getQualityPreset(opts.preset),
+        camera: opts.camera,
+        enumerate: enumerateStudioDevices,
+        applyEncoderSettings: (obs) =>
+          applyWhatnotEncoderSettings(obs, { bitrateKbps: getQualityPreset(opts.preset).bitrateKbps }),
+        writeStreamEncoderJson: writeEncoderJson,
+        hardwareEncoder: opts.hardwareEncoder,
+        existingPreviousEncoders: opts.existingPreviousEncoders,
+      });
+      useAppStore.getState().setDeviceEnum({
+        connected: true,
+        video: applied.devices.video,
+        audio: applied.devices.audio,
+      });
+      if (applied.previousEncoders) {
+        const previous = keepHardwarePrevious(applied.previousEncoders);
+        setShowConfig({
+          hardwareEncoderPending: true,
+          previousSimpleEncoder: previous.simple,
+          previousAdvEncoder: previous.adv,
+        });
+      } else if (!opts.hardwareEncoder) {
+        setShowConfig({ hardwareEncoderPending: false });
+      }
+      if (applied.cameraMissing && opts.camera) {
+        setSetupResumeMessage(missingCameraMessage(opts.camera));
+        return false;
+      }
+      return true;
+    } catch {
+      return true;
+    } finally {
+      try {
+        await client.disconnect();
+      } catch {
+        // already closed
+      }
+    }
+  }
+
+  async function handleHardwareEncoderToggle(on: boolean) {
+    if (on) {
+      setShowConfig({ hardwareEncoder: true });
+      return;
+    }
+    setShowConfig({ hardwareEncoder: false });
+    const latest = useAppStore.getState().showConfig;
+    const previous = storedPreviousEncoders(latest);
+    if (!previous) {
+      setShowConfig({ hardwareEncoderPending: false });
+      return;
+    }
+    if (!deviceEnum.connected) return;
+    const client = new RealObsClient();
+    try {
+      await client.connect(`ws://127.0.0.1:${latest.obsPort}`, latest.obsPassword);
+      await revertHardwareEncoder(client, previous);
+      useAppStore.getState().setShowConfig({
+        hardwareEncoder: false,
+        hardwareEncoderPending: false,
+      });
+    } catch {
+      // keep previous ids and pending so Continue / Re-test / failed Go Live can still revert
+    } finally {
+      try {
+        await client.disconnect();
+      } catch {
+        // already closed
+      }
+    }
+  }
+
+  async function handleRetest() {
+    setQualityTesting(true);
+    try {
+      const choice = showConfig.qualityChoice ?? "automatic";
+      const resolved = await prepareQualityForGoLive({ choice, probe: probeUpload });
+      setShowConfig({ lastQualitySummary: resolved.summary });
+      if (!deviceEnum.connected) return;
+      const latest = useAppStore.getState().showConfig;
+      const cameraOk = await reenumerateAfterQuality({
+        preset: resolved.preset,
+        hardwareEncoder: latest.hardwareEncoder === true,
+        camera: latest.camera,
+        port: latest.obsPort,
+        password: latest.obsPassword,
+        existingPreviousEncoders: storedPreviousEncoders(latest),
+      });
+      if (!cameraOk) return;
+    } catch {
+      setShowConfig({ lastQualitySummary: "Couldn't test your upload — streaming at Steady." });
+    } finally {
+      setQualityTesting(false);
+    }
+  }
+
   async function handleContinue() {
     setStarting(true);
     setSetupError(null);
     try {
+      const latest = useAppStore.getState().showConfig;
+      const resolved = await prepareQualityForGoLive({
+        choice: latest.qualityChoice ?? "automatic",
+        probe: probeUpload,
+      });
+      setShowConfig({ lastQualitySummary: resolved.summary });
       const result = await runAppFirstRun({
         bridge: window.whatnotStudio,
-        port: showConfig.obsPort,
-        password: showConfig.obsPassword,
+        port: latest.obsPort,
+        password: latest.obsPassword,
         obsAlreadyRunning: deviceEnum.connected,
         makeObsClient: () => new RealObsClient(),
+        qualityPreset: resolved.preset,
+        hardwareEncoder: latest.hardwareEncoder === true,
+        existingPreviousEncoders: storedPreviousEncoders(latest),
       });
       if (!result.ok) {
         setSetupError(result.reason ?? "First-run setup failed for an unknown reason.");
@@ -125,6 +297,41 @@ export default function SetupScreen() {
         // Non-blocking: still proceed, just surface the warning.
         setSetupError(result.versionWarning);
       }
+      if (result.hardwareEncoderPrevious) {
+        const previous = keepHardwarePrevious(result.hardwareEncoderPrevious);
+        setShowConfig({
+          hardwareEncoderPending: true,
+          previousSimpleEncoder: previous.simple,
+          previousAdvEncoder: previous.adv,
+        });
+      } else if (latest.hardwareEncoder !== true) {
+        setShowConfig({ hardwareEncoderPending: false });
+      }
+
+      const after = useAppStore.getState().showConfig;
+      const client = new RealObsClient();
+      try {
+        await client.connect(`ws://127.0.0.1:${after.obsPort}`, after.obsPassword);
+        const devices = await enumerateStudioDevices(client);
+        useAppStore.getState().setDeviceEnum({
+          connected: true,
+          video: devices.video,
+          audio: devices.audio,
+        });
+        if (after.camera && !devices.video.some((d) => d.deviceId === after.camera!.deviceId)) {
+          setSetupResumeMessage(missingCameraMessage(after.camera));
+          return;
+        }
+      } catch {
+        // Failed to list devices is not "enumerated without this camera".
+      } finally {
+        try {
+          await client.disconnect();
+        } catch {
+          // already closed
+        }
+      }
+
       const next = upsertShow(saved, persistableShowConfig(useAppStore.getState().showConfig), snapshotShowExtras(showConfig.showName));
       setSaved(next);
       try {
@@ -188,6 +395,12 @@ export default function SetupScreen() {
       captureCard: null,
       obsPassword: session.obsPassword,
       obsPort: session.obsPort,
+      qualityChoice: "automatic",
+      hardwareEncoder: false,
+      hardwareEncoderPending: false,
+      previousSimpleEncoder: null,
+      previousAdvEncoder: null,
+      lastQualitySummary: null,
     });
     setSetupResumeMessage(null);
   }
@@ -233,6 +446,16 @@ export default function SetupScreen() {
           placeholder="Saturday Night Vintage"
         />
       </label>
+
+      <QualityCard
+        choice={showConfig.qualityChoice ?? "automatic"}
+        summary={showConfig.lastQualitySummary ?? null}
+        hardwareEncoder={showConfig.hardwareEncoder === true}
+        testing={qualityTesting || starting}
+        onChoice={(qualityChoice) => setShowConfig({ qualityChoice })}
+        onHardwareEncoder={(hardwareEncoder) => void handleHardwareEncoderToggle(hardwareEncoder)}
+        onRetest={() => void handleRetest()}
+      />
 
       <DeviceDropdown
         label={deviceFieldLabel("Camera")}
@@ -353,6 +576,62 @@ export function ShowPicker(props: {
       >
         Start a new show
       </button>
+    </section>
+  );
+}
+
+export function QualityCard(props: {
+  choice: QualityChoice;
+  summary: string | null;
+  hardwareEncoder: boolean;
+  testing: boolean;
+  onChoice: (choice: QualityChoice) => void;
+  onHardwareEncoder: (on: boolean) => void;
+  onRetest: () => void;
+}) {
+  const options: { id: QualityChoice; label: string }[] = [
+    { id: "automatic", label: "Automatic (recommended)" },
+    { id: "best", label: "Best" },
+    { id: "steady", label: "Steady" },
+  ];
+  return (
+    <section className="flex flex-col gap-4 rounded-md bg-neutral-900 px-4 py-4 ring-1 ring-neutral-800" aria-label="Internet & quality">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="text-sm font-medium uppercase tracking-[0.18em] text-amber-500/90">Internet & quality</h2>
+        <button
+          type="button"
+          className="rounded-md bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700 disabled:cursor-not-allowed disabled:text-neutral-600"
+          disabled={props.testing}
+          onClick={props.onRetest}
+        >
+          {props.testing ? "Testing…" : "Re-test"}
+        </button>
+      </div>
+      <fieldset className="flex flex-col gap-2">
+        <legend className="sr-only">Quality</legend>
+        {options.map((opt) => (
+          <label key={opt.id} className="flex min-h-12 cursor-pointer items-center gap-3 text-base">
+            <input
+              type="radio"
+              name="quality-choice"
+              className="h-4 w-4 accent-amber-500"
+              checked={props.choice === opt.id}
+              onChange={() => props.onChoice(opt.id)}
+            />
+            {opt.label}
+          </label>
+        ))}
+      </fieldset>
+      {props.summary ? <p className="text-sm text-neutral-400">{props.summary}</p> : null}
+      <label className="flex min-h-12 cursor-pointer items-start gap-3 text-base">
+        <input
+          type="checkbox"
+          className="mt-1 h-4 w-4 accent-amber-500"
+          checked={props.hardwareEncoder}
+          onChange={(e) => props.onHardwareEncoder(e.target.checked)}
+        />
+        <span>{HARDWARE_ENCODER_LABEL}</span>
+      </label>
     </section>
   );
 }

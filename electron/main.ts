@@ -31,6 +31,7 @@ import {
   showStorePath,
   writeShowStoreFile,
 } from "./configStore.js";
+import { runUploadProbe } from "./uploadProbe.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -297,6 +298,8 @@ app.whenReady().then(() => {
   ipcMain.handle("clipboard:write", (_event, text: string) => {
     clipboard.writeText(text);
   });
+
+  ipcMain.handle("quality:probeUpload", async () => runUploadProbe());
 
   // Always re-read from disk. The seller's Try again depends on picking up
   // a change they just made in OBS's WebSocket Server Settings.

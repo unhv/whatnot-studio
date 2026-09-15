@@ -33,6 +33,8 @@ import {
   type StreamStateChangedEvent,
 } from "../obs/liveMode.js";
 import type { ObsClient } from "../obs/client.js";
+import { idleEncoderWatch, type EncoderWatchState } from "../obs/quality.js";
+import type { HealthWarning } from "../obs/health.js";
 import {
   CAMERA_FACING_SCENES,
   ITEM_BAR_SOURCE,
@@ -55,6 +57,12 @@ export interface AppState {
   /** Setup-screen OBS device list. Independent of live.connectionStatus
    * so enumerating on Setup cannot clobber the LIVE screen's socket flag. */
   deviceEnum: DeviceEnumState;
+  qualityTesting: boolean;
+  /** True after a go-live quality apply this visit, so LIVE does not probe twice. */
+  goLiveQualityApplied: boolean;
+  healthWarning: HealthWarning | null;
+  encoderRevertMessage: string | null;
+  encoderWatch: EncoderWatchState;
 
   setShowConfig(config: Partial<ShowConfig>): void;
   setDeviceEnum(enumState: DeviceEnumState): void;
@@ -70,6 +78,11 @@ export interface AppState {
   /** Losing obs-websocket is not the show ending. */
   applySocketDisconnect(now?: number): void;
   setConnectionStatus(status: AppState["connectionStatus"]): void;
+  setQualityTesting(testing: boolean): void;
+  setGoLiveQualityApplied(applied: boolean): void;
+  setHealthWarning(warning: HealthWarning | null): void;
+  setEncoderRevertMessage(message: string | null): void;
+  setEncoderWatch(watch: EncoderWatchState): void;
 }
 
 export const DEFAULT_SHOW_CONFIG: ShowConfig = {
@@ -81,11 +94,37 @@ export const DEFAULT_SHOW_CONFIG: ShowConfig = {
   // persistableShowConfig blanks this so it is never written as plain JSON.
   obsPassword: "",
   obsPort: 4455,
+  qualityChoice: "automatic",
+  hardwareEncoder: false,
+  hardwareEncoderPending: false,
+  previousSimpleEncoder: null,
+  previousAdvEncoder: null,
+  lastQualitySummary: null,
 };
+
+function qualityFields(config: ShowConfig): Pick<
+  ShowConfig,
+  | "qualityChoice"
+  | "hardwareEncoder"
+  | "hardwareEncoderPending"
+  | "previousSimpleEncoder"
+  | "previousAdvEncoder"
+  | "lastQualitySummary"
+> {
+  const choice = config.qualityChoice;
+  return {
+    qualityChoice: choice === "best" || choice === "steady" || choice === "automatic" ? choice : "automatic",
+    hardwareEncoder: config.hardwareEncoder === true,
+    hardwareEncoderPending: config.hardwareEncoderPending === true,
+    previousSimpleEncoder: config.previousSimpleEncoder ?? null,
+    previousAdvEncoder: config.previousAdvEncoder ?? null,
+    lastQualitySummary: config.lastQualitySummary ?? null,
+  };
+}
 
 /** Drop the OBS websocket password before any disk/JSON snapshot. */
 export function persistableShowConfig(config: ShowConfig): ShowConfig {
-  return { ...config, obsPassword: "" };
+  return { ...config, ...qualityFields(config), obsPassword: "" };
 }
 
 type BootShowBridge = {
@@ -508,6 +547,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   live: initialLiveState(Date.now()),
   connectionStatus: "disconnected",
   deviceEnum: initialDeviceEnum(),
+  qualityTesting: false,
+  goLiveQualityApplied: false,
+  healthWarning: null,
+  encoderRevertMessage: null,
+  encoderWatch: idleEncoderWatch(),
 
   setShowConfig: (config) => set((s) => ({ showConfig: { ...s.showConfig, ...config } })),
   setDeviceEnum: (deviceEnum) => {
@@ -517,7 +561,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSetupResumeMessage: (setupResumeMessage) => set({ setupResumeMessage }),
   goToLive: () => set({ screen: "live" }),
   goToSetup: () =>
-    set((s) => (s.live.live ? s : { screen: "setup" })), // "Setup" link is disabled while LIVE; config stays loaded
+    set((s) => (s.live.live ? s : { screen: "setup", goLiveQualityApplied: false })), // "Setup" link is disabled while LIVE; config stays loaded
   setActiveScene: (scene) => set({ activeScene: scene }),
   setMicMuted: (muted) => set({ micMuted: muted }),
   dispatchItemBar: (action) => {
@@ -531,4 +575,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   applySocketDisconnect: (now = Date.now()) =>
     set((s) => ({ live: deriveSocketDisconnect(s.live, now) })),
   setConnectionStatus: (status) => set({ connectionStatus: status }),
+  setQualityTesting: (qualityTesting) => set({ qualityTesting }),
+  setGoLiveQualityApplied: (goLiveQualityApplied) => set({ goLiveQualityApplied }),
+  setHealthWarning: (healthWarning) => set({ healthWarning }),
+  setEncoderRevertMessage: (encoderRevertMessage) => set({ encoderRevertMessage }),
+  setEncoderWatch: (encoderWatch) => set({ encoderWatch }),
 }));
