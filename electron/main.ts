@@ -32,6 +32,7 @@ import {
   writeShowStoreFile,
 } from "./configStore.js";
 import { runUploadProbe } from "./uploadProbe.js";
+import { resolveBrowserPath } from "./browser.js";
 import {
   createMuteHotkeyController,
   DEFAULT_MUTE_ACCELERATOR,
@@ -57,45 +58,16 @@ function firstRunPaths(profileName: string = PROFILE_NAME) {
   };
 }
 
-// Whatnot's Show Tools page requires Chrome specifically ("Other Chromium
-// based browsers may work but are not guaranteed" -- measured 2026-09-15,
-// whatnot-show-tools-measured.md). Try the usual Windows install locations
-// before falling back to the OS default browser.
-const CHROME_CANDIDATE_PATHS = [
-  path.join(process.env["PROGRAMFILES"] ?? "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
-  path.join(
-    process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)",
-    "Google",
-    "Chrome",
-    "Application",
-    "chrome.exe"
-  ),
-  path.join(process.env["LOCALAPPDATA"] ?? "", "Google", "Chrome", "Application", "chrome.exe"),
-];
-
-async function resolveChromePath(): Promise<string | null> {
-  for (const candidate of CHROME_CANDIDATE_PATHS) {
-    try {
-      await fs.access(candidate);
-      return candidate;
-    } catch {
-      // not at this location, try the next
-    }
-  }
-  return null;
-}
-
-/** Open a URL in Chrome specifically, falling back to the OS default
- * browser (via shell.openExternal) if Chrome's path can't be resolved.
- * The fallback case is recorded in FINDINGS.md rather than assumed away. */
-async function openInChrome(url: string): Promise<void> {
-  const chromePath = await resolveChromePath();
-  if (!chromePath) {
+/** Open a URL in a Chromium browser. Edge is first (seller session), then
+ * Chrome, then the OS default via shell.openExternal. */
+async function openInBrowser(url: string): Promise<void> {
+  const browserPath = await resolveBrowserPath();
+  if (!browserPath) {
     await shell.openExternal(url);
     return;
   }
   await new Promise<void>((resolve, reject) => {
-    execFile(chromePath, [url], (err) => (err ? reject(err) : resolve()));
+    execFile(browserPath, [url], (err) => (err ? reject(err) : resolve()));
   });
 }
 
@@ -346,8 +318,8 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle("shell:openInChrome", async (_event, url: string) => {
-    await openInChrome(url);
+  ipcMain.handle("shell:openInBrowser", async (_event, url: string) => {
+    await openInBrowser(url);
   });
 
   ipcMain.handle("clipboard:write", (_event, text: string) => {

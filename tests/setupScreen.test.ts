@@ -124,6 +124,11 @@ describe("setup screen — Continue is disabled while a stored camera is known-m
     expect(src).toContain("setSetupResumeMessage(null)");
   });
 
+  it("opens Show Tools through openInBrowser, not a Chrome-named method", () => {
+    expect(src).toContain('window.whatnotStudio.openInBrowser("https://www.whatnot.com/dashboard/lives/setup")');
+    expect(src.includes("openIn" + "Chrome")).toBe(false);
+  });
+
   it("resumes a picked saved show through resumePickedShow, not a second ad-hoc rule", () => {
     expect(src).toContain("resumePickedShow");
     expect(src).toMatch(/if\s*\(picked\.goLive\)\s*goToLive\(\)/);

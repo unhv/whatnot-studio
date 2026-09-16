@@ -1,6 +1,6 @@
 # Installing Whatnot Studio
 
-Whatnot Studio is a Windows app for sellers. It sits next to Whatnot in Chrome and runs OBS for you, so you do not have to set up scenes yourself.
+Whatnot Studio is a Windows app for sellers. It sits next to Whatnot in a Chromium browser and runs OBS for you, so you do not have to set up scenes yourself.
 
 This is not a Go Live button. You still go live in Whatnot's own Show Tools page. This app only owns the picture and the sound.
 
@@ -11,7 +11,7 @@ This is not a Go Live button. You still go live in Whatnot's own Show Tools page
 3. Install OBS from https://obsproject.com into the usual place:
    `C:\Program Files\obs-studio`
    You do not need to open OBS, make scenes, or turn anything on. Whatnot Studio starts OBS and talks to it on this computer at `127.0.0.1` port `4455`.
-4. Google Chrome, signed in to your Whatnot seller account. Whatnot's Show Tools page is not reliable in other browsers.
+4. A Chromium browser signed in to your Whatnot seller account. Microsoft Edge is preferred (that is where the seller session lives); Google Chrome also works. Whatnot's Show Tools page is not reliable outside Chromium.
 
 ## Install Whatnot Studio
 

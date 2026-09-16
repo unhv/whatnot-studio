@@ -363,7 +363,7 @@ export default function SetupScreen() {
     // Khan's own signed-in Chrome: the real Show Tools URL is
     // /dashboard/lives/setup. The earlier /dashboard/livestream/setup guess
     // 404s.
-    await window.whatnotStudio.openInChrome("https://www.whatnot.com/dashboard/lives/setup");
+    await window.whatnotStudio.openInBrowser("https://www.whatnot.com/dashboard/lives/setup");
   }
 
   function pickSavedShow(name: string) {

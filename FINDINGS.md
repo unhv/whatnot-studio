@@ -530,12 +530,13 @@ no browser opened this session):
 
 - **Show Tools URL fixed**: `SetupScreen.tsx` now opens `https://www.whatnot.com/dashboard/lives/setup`
   (the old `/dashboard/livestream/setup` guess 404s).
-- **Chrome-specific launch implemented**: `electron/main.ts` now has `resolveChromePath()` (checks
-  the three standard Windows install locations) + `openInChrome()`, exposed as
-  `shell:openInChrome`/`window.whatnotStudio.openInChrome`, used only by the Show Tools button.
-  Falls back to `shell.openExternal` (OS default browser) if Chrome isn't found at any of those
-  paths — **this fallback path was not exercised live** (Chrome IS installed and found at the
-  standard path on this machine), so it is implemented but unverified; flagged in HANDOVER.md.
+- **Chromium launch implemented**: `electron/browser.ts` has `resolveBrowserPath()` — Edge
+  (`msedge.exe`) at the three standard Windows locations (Program Files (x86), then Program Files,
+  then LocalAppData), then Chrome at its three locations, then `null` so the caller uses
+  `shell.openExternal`. Launcher is `openInBrowser()`, exposed as
+  `shell:openInBrowser`/`window.whatnotStudio.openInBrowser`, used only by the Show Tools button.
+  Edge is first because that is where the seller's Whatnot session lives; Whatnot's warning is
+  about Chromium, not Chrome specifically. The `openExternal` fallback is still unverified live.
 - **Port 4455 already correct** — `DEFAULT_SHOW_CONFIG.obsPort` in `src/state/store.ts` was already
   `4455`, no code change needed. (Also incidentally the exact port this whole session's live testing
   used throughout.)

@@ -13,6 +13,6 @@
     "rootDir": "..",
     "noEmit": false
   },
-  "include": ["main.ts", "configStore.ts", "uploadProbe.ts", "../src/obs/**/*.ts", "../src/shared/**/*.ts", "../spike/lib.ts", "../spike/obs-launcher.ts"]
+  "include": ["main.ts", "browser.ts", "configStore.ts", "uploadProbe.ts", "../src/obs/**/*.ts", "../src/shared/**/*.ts", "../spike/lib.ts", "../spike/obs-launcher.ts"]
 }
 

@@ -45,8 +45,9 @@ const api = {
     }
   },
 
-  // Whatnot requires Chrome specifically for Show Tools -- see electron/main.ts.
-  openInChrome: (url: string): Promise<void> => ipcRenderer.invoke("shell:openInChrome", url),
+  // Show Tools needs Chromium. Edge is first because that is where the
+  // seller's signed-in Whatnot session lives; Chrome is next.
+  openInBrowser: (url: string): Promise<void> => ipcRenderer.invoke("shell:openInBrowser", url),
 
   copyToClipboard: (text: string): Promise<void> => ipcRenderer.invoke("clipboard:write", text),
 
