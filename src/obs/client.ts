@@ -195,26 +195,38 @@ export function startObsSetupSession(opts: ObsSetupSessionOpts): { stop: () => v
   };
 }
 
+type ObsSocket = {
+  connect: (url: string, password?: string) => Promise<unknown>;
+  disconnect: () => Promise<void>;
+  call: (requestType: string, requestData?: Record<string, unknown>) => Promise<unknown>;
+  on: (event: string, listener: (data: unknown) => void) => void;
+  off: (event: string, listener: (data: unknown) => void) => void;
+};
+
 /** Real implementation, wrapping obs-websocket-js v5. Constructed lazily so
  * importing this module never touches a socket. */
 export class RealObsClient implements ObsClient {
   // Typed loosely deliberately: obs-websocket-js's OBSWebSocket type is
   // imported dynamically so this module has zero side effects at import
   // time, which keeps it safe to import from tests that never call connect().
-  private socket: {
-    connect: (url: string, password?: string) => Promise<unknown>;
-    disconnect: () => Promise<void>;
-    call: (requestType: string, requestData?: Record<string, unknown>) => Promise<unknown>;
-    on: (event: string, listener: (data: unknown) => void) => void;
-    off: (event: string, listener: (data: unknown) => void) => void;
-  } | null = null;
+  // Memoize the construction promise (not the instance) so concurrent
+  // on()/connect() callers in the same tick share one socket.
+  private socketPromise: Promise<ObsSocket> | null = null;
 
-  private async ensureSocket() {
-    if (!this.socket) {
-      const { default: OBSWebSocket } = await import("obs-websocket-js");
-      this.socket = new OBSWebSocket() as unknown as typeof this.socket;
+  private ensureSocket(): Promise<ObsSocket> {
+    if (!this.socketPromise) {
+      const pending = this.importSocket().catch((err) => {
+        if (this.socketPromise === pending) this.socketPromise = null;
+        throw err;
+      });
+      this.socketPromise = pending;
     }
-    return this.socket!;
+    return this.socketPromise;
+  }
+
+  private async importSocket(): Promise<ObsSocket> {
+    const { default: OBSWebSocket } = await import("obs-websocket-js");
+    return new OBSWebSocket() as unknown as ObsSocket;
   }
 
   async connect(url: string, password?: string): Promise<void> {
@@ -223,8 +235,15 @@ export class RealObsClient implements ObsClient {
   }
 
   async disconnect(): Promise<void> {
-    if (!this.socket) return;
-    await this.socket.disconnect();
+    const pending = this.socketPromise;
+    this.socketPromise = null;
+    if (!pending) return;
+    try {
+      const socket = await pending;
+      await socket.disconnect();
+    } catch {
+      // construction failed or already closed
+    }
   }
 
   async call<T = unknown>(requestType: string, requestData?: Record<string, unknown>): Promise<T> {
@@ -233,11 +252,18 @@ export class RealObsClient implements ObsClient {
   }
 
   on(event: string, listener: (data: unknown) => void): void {
-    void this.ensureSocket().then((socket) => socket.on(event, listener));
+    void this.ensureSocket()
+      .then((socket) => socket.on(event, listener))
+      .catch(() => {
+        // construction failed; caller will see it on connect()/call()
+      });
   }
 
   off(event: string, listener: (data: unknown) => void): void {
-    if (!this.socket) return;
-    this.socket.off(event, listener);
+    const pending = this.socketPromise;
+    if (!pending) return;
+    void pending.then((socket) => socket.off(event, listener)).catch(() => {
+      // construction failed; nothing to detach
+    });
   }
 }

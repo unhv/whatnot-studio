@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { FakeObsClient } from "./testUtils/fakeObsClient.js";
+import { startCameraPanelSocket } from "../src/renderer/CameraLayoutPanel.js";
 import {
   CAMERA_LAYOUT_OBS_DEBOUNCE_MS,
   CameraLayoutObsSync,
@@ -419,5 +420,99 @@ describe("buildDesiredScenes BOTH layout", () => {
     const ops = compileScenePlan(desired, EMPTY_OBS_STATE);
     const after = applyOpsToState(EMPTY_OBS_STATE, ops);
     expect(compileScenePlan(desired, after)).toEqual([]);
+  });
+});
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("timed out waiting for camera panel socket");
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+describe("camera panel owned socket reconnect", () => {
+  it("reconnects after a simulated close, and stops once unmounted", async () => {
+    const client = new FakeObsClient();
+    const statuses: boolean[] = [];
+    const session = startCameraPanelSocket({
+      client,
+      url: "ws://127.0.0.1:4455",
+      password: "pw",
+      retryMs: 15,
+      onStatus: (connected) => statuses.push(connected),
+    });
+
+    await waitUntil(() => client.connectCalls === 1 && statuses.includes(true));
+    expect(statuses.at(-1)).toBe(true);
+
+    client.emit("ConnectionClosed");
+    expect(statuses.at(-1)).toBe(false);
+    await waitUntil(() => client.connectCalls === 2);
+    expect(statuses.at(-1)).toBe(true);
+
+    session.stop();
+    const callsAfterStop = client.connectCalls;
+    client.emit("ConnectionClosed");
+    client.emit("ConnectionError");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(client.connectCalls).toBe(callsAfterStop);
+  });
+
+  it("retries a close that arrives while the successful connect is still in flight", async () => {
+    const client = new FakeObsClient();
+    const statuses: boolean[] = [];
+    let droppedOnce = false;
+    const session = startCameraPanelSocket({
+      client,
+      url: "ws://127.0.0.1:4455",
+      retryMs: 15,
+      onStatus: (connected) => {
+        statuses.push(connected);
+        if (connected && !droppedOnce) {
+          droppedOnce = true;
+          client.emit("ConnectionClosed");
+        }
+      },
+    });
+
+    await waitUntil(() => client.connectCalls === 1 && statuses.includes(true));
+    await waitUntil(() => client.connectCalls === 2);
+    expect(statuses.at(-1)).toBe(true);
+
+    session.stop();
+    const callsAfterStop = client.connectCalls;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(client.connectCalls).toBe(callsAfterStop);
+  });
+
+  it("retries after a connect error with a delay, then stops on unmount", async () => {
+    const client = new FakeObsClient();
+    let attempts = 0;
+    client.connect = async () => {
+      attempts += 1;
+      client.connectCalls += 1;
+      if (attempts === 1) throw new Error("obs down");
+      client.connected = true;
+    };
+
+    const session = startCameraPanelSocket({
+      client,
+      url: "ws://127.0.0.1:4455",
+      retryMs: 15,
+      onStatus: () => {},
+    });
+
+    await waitUntil(() => client.connectCalls === 1);
+    expect(client.connectCalls).toBe(1);
+    await waitUntil(() => client.connectCalls === 2);
+    expect(attempts).toBe(2);
+
+    session.stop();
+    const callsAfterStop = client.connectCalls;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(client.connectCalls).toBe(callsAfterStop);
   });
 });

@@ -57,11 +57,106 @@ function scaleY(n: number): number {
   return (n / CANVAS_HEIGHT) * LAYOUT_PREVIEW_H;
 }
 
+/** Delay between a dropped owned socket and the next connect attempt. */
+export const CAMERA_PANEL_RETRY_MS = 500;
+
+/**
+ * Connect the camera panel's own OBS socket and retry with a short delay
+ * after close/error, until `stop()` (unmount). Injected clients are owned
+ * elsewhere and must not go through this.
+ */
+export function startCameraPanelSocket(opts: {
+  client: Pick<ObsClient, "connect" | "disconnect" | "on" | "off">;
+  url: string;
+  password?: string;
+  retryMs?: number;
+  onStatus: (connected: boolean) => void;
+}): { stop: () => void } {
+  const { client, url, password, retryMs = CAMERA_PANEL_RETRY_MS, onStatus } = opts;
+  let cancelled = false;
+  let inFlight = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearRetry() {
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  function scheduleRetry() {
+    if (cancelled) return;
+    clearRetry();
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void connectOnce();
+    }, retryMs);
+  }
+
+  const onDropped = () => {
+    // Do not consult inFlight: connectOnce keeps that flag set through
+    // on(ConnectionClosed) and onStatus(true). A close in that gap must
+    // still scheduleRetry, or the panel sits disconnected until unmount.
+    if (cancelled) return;
+    onStatus(false);
+    scheduleRetry();
+  };
+
+  async function connectOnce() {
+    if (cancelled || inFlight) return;
+    inFlight = true;
+    clearRetry();
+    client.off("ConnectionClosed", onDropped);
+    client.off("ConnectionError", onDropped);
+    try {
+      try {
+        await client.disconnect();
+      } catch {
+        // already closed
+      }
+      if (cancelled) return;
+      await client.connect(url, password);
+      if (cancelled) {
+        try {
+          await client.disconnect();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      client.on("ConnectionClosed", onDropped);
+      client.on("ConnectionError", onDropped);
+      onStatus(true);
+    } catch {
+      if (!cancelled) {
+        onStatus(false);
+        scheduleRetry();
+      }
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  void connectOnce();
+
+  return {
+    stop: () => {
+      cancelled = true;
+      clearRetry();
+      client.off("ConnectionClosed", onDropped);
+      client.off("ConnectionError", onDropped);
+      onStatus(false);
+      void client.disconnect();
+    },
+  };
+}
+
 export default function CameraLayoutPanel(props: {
   client?: ObsClient;
   storage?: StorageLike | null;
   clock?: CameraLayoutClock;
   debounceMs?: number;
+  retryMs?: number;
 }) {
   const showConfig = useAppStore((s) => s.showConfig);
   const obsPort = showConfig.obsPort;
@@ -114,36 +209,44 @@ export default function CameraLayoutPanel(props: {
       connectedRef.current = false;
       if (!cancelled) setPanelConnected(false);
     };
-    client.on("ConnectionClosed", onClosed);
 
-    async function connectThenResync() {
-      if (owned) {
-        try {
-          await client.connect(`ws://127.0.0.1:${obsPort}`, obsPassword);
-        } catch {
-          connectedRef.current = false;
-          if (!cancelled) setPanelConnected(false);
-          return;
-        }
-      }
+    function markConnected() {
       if (cancelled) return;
       connectedRef.current = true;
       setPanelConnected(true);
       sync.resync(layoutRef.current);
     }
 
-    void connectThenResync();
+    let socketSession: { stop: () => void } | null = null;
+    if (owned) {
+      socketSession = startCameraPanelSocket({
+        client,
+        url: `ws://127.0.0.1:${obsPort}`,
+        password: obsPassword,
+        retryMs: props.retryMs,
+        onStatus: (connected) => {
+          if (connected) markConnected();
+          else onClosed();
+        },
+      });
+    } else {
+      client.on("ConnectionClosed", onClosed);
+      markConnected();
+    }
 
     return () => {
       cancelled = true;
-      client.off("ConnectionClosed", onClosed);
+      if (socketSession) {
+        socketSession.stop();
+      } else {
+        client.off("ConnectionClosed", onClosed);
+      }
       connectedRef.current = false;
       syncRef.current = null;
       clientRef.current = null;
       sync.dispose();
-      if (owned) void client.disconnect();
     };
-  }, [obsPort, obsPassword, props.client, props.clock, props.debounceMs, storage]);
+  }, [obsPort, obsPassword, props.client, props.clock, props.debounceMs, props.retryMs, storage]);
 
   useEffect(() => {
     let cancelled = false;
